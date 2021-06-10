@@ -132,7 +132,7 @@ func (r *Runner) lookupVar(name string) expand.Variable {
 		if r.filename != "" {
 			vr.Str = r.filename
 		} else {
-			vr.Str = "gosh"
+			vr.Str = "hilbish"
 		}
 	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 		vr.Kind = expand.String
