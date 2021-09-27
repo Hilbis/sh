@@ -61,10 +61,27 @@ func (r *Runner) fillExpandConfig(ctx context.Context) {
 				r.rand = rand.New(rand.NewSource(time.Now().UnixNano()))
 			}
 			dir := os.TempDir()
-			path := fmt.Sprintf("%s/sh-interp-%d", dir, r.rand.Uint32())
-			if err := mkfifo(path, 0o666); err != nil {
-				return "", fmt.Errorf("cannot create fifo: %v", err)
+
+			// We can't atomically create a random unused temporary FIFO.
+			// Similar to os.CreateTemp,
+			// keep trying new random paths until one does not exist.
+			// We use a uint64 because a uint32 easily runs into retries.
+			var path string
+			try := 0
+			for {
+				path = fmt.Sprintf("%s/sh-interp-%x", dir, r.rand.Uint64())
+				err := mkfifo(path, 0o666)
+				if err == nil {
+					break
+				}
+				if !os.IsExist(err) {
+					return "", fmt.Errorf("cannot create fifo: %v", err)
+				}
+				if try++; try > 100 {
+					return "", fmt.Errorf("giving up at creating fifo: %v", err)
+				}
 			}
+
 			r2 := r.Subshell()
 			stdout := r.origStdout
 			r.wgProcSubsts.Add(1)
@@ -258,13 +275,13 @@ func (r *Runner) stmtSync(ctx context.Context, st *syntax.Stmt) {
 		cls, err := r.redir(ctx, rd)
 		if err != nil {
 			r.exit = 1
-			return
+			break
 		}
 		if cls != nil {
 			defer cls.Close()
 		}
 	}
-	if st.Cmd != nil {
+	if r.exit == 0 && st.Cmd != nil {
 		r.cmd(ctx, st.Cmd)
 	}
 	if st.Negated {

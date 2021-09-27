@@ -90,6 +90,9 @@ func TestMain(m *testing.M) {
 		case "pid_and_hang":
 			fmt.Println(os.Getpid())
 			time.Sleep(time.Hour)
+		case "foo_null_bar":
+			fmt.Println("foo\x00bar")
+			os.Exit(1)
 		}
 		r := strings.NewReader(os.Args[1])
 		file, err := syntax.NewParser().Parse(r, "")
@@ -124,6 +127,13 @@ func TestMain(m *testing.M) {
 	os.Setenv("LC_ALL", "en_US.UTF-8")
 	os.Unsetenv("CDPATH")
 	hasBash50 = checkBash()
+
+	wd, err := os.Getwd()
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("GO_TEST_DIR", wd)
+
 	os.Setenv("INTERP_GLOBAL", "value")
 	os.Setenv("MULTILINE_INTERP_GLOBAL", "\nwith\nnewlines\n\n")
 
@@ -322,6 +332,47 @@ var runTests = []runTest{
 	{`echo $'\x\xf\x09\xAB'`, "\\x\x0f\x09\xab\n"},
 	{`echo $'\u\uf\u09\uABCD\u00051234'`, "\\u\u000f\u0009\uabcd\u00051234\n"},
 	{`echo $'\U\Uf\U09\UABCD\U00051234'`, "\\U\u000f\u0009\uabcd\U00051234\n"},
+	{
+		"echo 'foo\x00bar'",
+		"foobar\n",
+	},
+	{
+		"echo \"foo\x00bar\"",
+		"foobar\n",
+	},
+	{
+		"echo $'foo\x00bar'",
+		"foobar\n",
+	},
+	{
+		"echo $'foo\\x00bar'",
+		"foo\n",
+	},
+	{
+		"echo $'foo\\xbar'",
+		"foo\xbar\n",
+	},
+	{
+		"a='foo\x00bar'; eval \"echo -n ${a} ${a@Q}\";",
+		"foobar foobar",
+	},
+	{
+		"a=$'foo\\x00bar'; eval \"echo -n ${a} ${a@Q}\";",
+		"foo foo",
+	},
+	{
+		"i\x00f true; then echo foo\x00; \x00fi",
+		"foo\n",
+	},
+	{
+		"echo $(GOSH_CMD=foo_null_bar $GOSH_PROG)",
+		"foobar\n #IGNORE",
+	},
+	// See the TODO where FOO_NULL_BAR is set.
+	// {
+	// 	"echo $FOO_NULL_BAR \"${FOO_NULL_BAR}\"",
+	// 	"foo\n",
+	// },
 
 	// escaped chars
 	{"echo a\\b", "ab\n"},
@@ -855,6 +906,22 @@ var runTests = []runTest{
 		`mkdir a; ln -s a b; [[ $(cd a && pwd) == "$(cd b && pwd)" ]]; echo $?`,
 		"1\n",
 	},
+	{
+		`pwd -a`,
+		"invalid option: \"-a\"\nexit status 2 #JUSTERR",
+	},
+	{
+		`pwd -L -P -a`,
+		"invalid option: \"-a\"\nexit status 2 #JUSTERR",
+	},
+	{
+		`mkdir a; ln -s a b; [[ "$(cd a && pwd -P)" == "$(cd b && pwd -P)" ]]`,
+		"",
+	},
+	{
+		`mkdir a; ln -s a b; [[ "$(cd a && pwd -P)" == "$(cd b && pwd -L)" ]]; echo $?`,
+		"1\n",
+	},
 
 	// dirs/pushd/popd
 	{"set -- $(dirs); echo $# ${#DIRSTACK[@]}", "1 1\n"},
@@ -1190,7 +1257,7 @@ var runTests = []runTest{
 	},
 	{
 		"mkdir a; echo foo >a |& grep -q 'is a directory'",
-		" #IGNORE",
+		" #IGNORE bash prints a warning",
 	},
 	{
 		"echo foo 1>&1 | sed 's/o/a/g'",
@@ -1449,6 +1516,10 @@ var runTests = []runTest{
 		"block\n",
 	},
 	{
+		"[[ -e /dev/nvme0n1 ]] || { echo block; exit; }; [[ -b /dev/nvme0n1 ]] && echo block; [[ -c /dev/nvme0n1 ]] && echo char; true",
+		"block\n",
+	},
+	{
 		"[[ -e /dev/tty ]] || { echo char; exit; }; [[ -b /dev/tty ]] && echo block; [[ -c /dev/tty ]] && echo char; true",
 		"char\n",
 	},
@@ -1675,7 +1746,7 @@ var runTests = []runTest{
 	},
 	{
 		"a=b b=a; echo $(($a))",
-		"0\n #IGNORE",
+		"0\n #IGNORE bash prints a warning",
 	},
 
 	// set/shift
@@ -1706,6 +1777,10 @@ var runTests = []runTest{
 	{
 		"set -e; false; echo foo",
 		"exit status 1",
+	},
+	{
+		"set -e; shouldnotexist; echo foo",
+		"\"shouldnotexist\": executable file not found in $PATH\nexit status 127 #JUSTERR",
 	},
 	{
 		"set -e; set +e; false; echo foo",
@@ -1893,7 +1968,7 @@ set +o pipefail
 	},
 	{
 		"readonly a=1; echo $a; unset a; echo $a",
-		"1\na: readonly variable\n1\n #IGNORE",
+		"1\na: readonly variable\n1\n #IGNORE bash prints a warning",
 	},
 	{
 		"f() { local a=1; echo $a; unset a; echo $a; }; f",
@@ -2583,6 +2658,22 @@ set +o pipefail
 		"IFS=: read a b c <<< '1\\:2:3'; echo \"$a\"; echo $b; echo $c",
 		"1:2\n3\n\n",
 	},
+	{
+		"read -p",
+		"read: -p: option requires an argument\nexit status 2 #JUSTERR",
+	},
+	{
+		"read -X -p",
+		"read: invalid option \"-X\"\nexit status 2 #JUSTERR",
+	},
+	{
+		"read -p 'Display me as a prompt. Continue? (y/n) ' choice <<< 'y'; echo $choice",
+		"Display me as a prompt. Continue? (y/n) y\n #IGNORE bash requires a terminal",
+	},
+	{
+		"read -r -p 'Prompt and raw flag together: ' a <<< '\\a\\b\\c'; echo $a",
+		"Prompt and raw flag together: \\a\\b\\c\n #IGNORE bash requires a terminal",
+	},
 
 	// getopts
 	{
@@ -2736,6 +2827,19 @@ var runTestsUnix = []runTest{
 		`mkdir a; chmod 0001 a; cd a && test $UID -ne 0`,
 		"exit status 1 #JUSTERR",
 	},
+	{
+		`unset UID`,
+		"UID: readonly variable\n #IGNORE",
+	},
+	// GID is not set in bash
+	{
+		`unset GID`,
+		"GID: readonly variable\n #IGNORE",
+	},
+	{
+		`[[ -z $GID ]] && echo "GID not set"`,
+		"exit status 1 #JUSTERR #IGNORE",
+	},
 
 	// Unix-y PATH
 	{
@@ -2757,6 +2861,16 @@ var runTestsUnix = []runTest{
 	{
 		"mkdir c; echo '#!/bin/sh\necho b' >c/a; chmod 0755 c/a; c/a",
 		"b\n",
+	},
+
+	// error strings which are too different on Windows
+	{
+		"echo foo >/shouldnotexist/file",
+		"open /shouldnotexist/file: no such file or directory\nexit status 1 #JUSTERR",
+	},
+	{
+		"set -e; echo foo >/shouldnotexist/file; echo foo",
+		"open /shouldnotexist/file: no such file or directory\nexit status 1 #JUSTERR",
 	},
 
 	// process substitution; named pipes (fifos) are a TODO for windows
@@ -2841,6 +2955,9 @@ func TestRunnerRun(t *testing.T) {
 			defer os.RemoveAll(dir)
 			var cb concBuffer
 			r, err := New(Dir(dir), StdIO(nil, &cb, &cb),
+				// TODO: why does this make some tests hang?
+				// Env(expand.ListEnviron(append(os.Environ(),
+				// 	"FOO_NULL_BAR=foo\x00bar")...)),
 				OpenHandler(testOpenHandler),
 				ExecHandler(testExecHandler),
 			)
@@ -3687,5 +3804,4 @@ func TestRunnerSubshell(t *testing.T) {
 	if want, got := "modified", r3.Vars["CHILD"].String(); got != want {
 		t.Fatalf("wrong output:\nwant: %q\ngot:  %q", want, got)
 	}
-
 }

@@ -139,7 +139,6 @@ func (p *Printer) Print(w io.Writer, node Node) error {
 	case *Stmt:
 		p.stmtList([]*Stmt{x}, nil)
 	case Command:
-		p.line = x.Pos().Line()
 		p.command(x, nil)
 	case *Word:
 		p.line = x.Pos().Line()
@@ -1008,6 +1007,7 @@ func (p *Printer) stmt(s *Stmt) {
 }
 
 func (p *Printer) command(cmd Command, redirs []*Redirect) (startRedirs int) {
+	p.line = cmd.Pos().Line()
 	p.spacePad(cmd.Pos())
 	switch x := cmd.(type) {
 	case *CallExpr:
@@ -1094,7 +1094,7 @@ func (p *Printer) command(cmd Command, redirs []*Redirect) (startRedirs int) {
 			p.spacedToken(x.Op.String(), x.OpPos)
 			if len(x.Y.Comments) > 0 {
 				p.wantSpace = false
-				p.newline(Pos{})
+				p.newline(x.Y.Pos())
 				p.indent()
 				p.comments(x.Y.Comments...)
 				p.newline(Pos{})
