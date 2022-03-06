@@ -20,7 +20,7 @@ import (
 
 func isBuiltin(name string) bool {
 	switch name {
-	case "true", ":", "false", "exit", "set", "shift", "unset",
+	case "true", ":", "false", "set", "shift", "unset",
 		"echo", "printf", "break", "continue", "pwd",
 		"wait", "builtin", "trap", "type", "source", ".", "command",
 		"dirs", "pushd", "popd", "umask", "alias", "unalias",
