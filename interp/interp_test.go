@@ -14,7 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -509,6 +509,7 @@ var runTests = []runTest{
 	{"a='abcx1y'; echo ${a//x[[:digit:]]y}", "abc\n"},
 	{`a=xyz; echo "${a/y/a  b}"`, "xa  bz\n"},
 	{"a='foo_interp_missing/bar_interp_missing'; echo ${a//o*a/}", "fr_interp_missing\n"},
+	{"a=foobar; echo ${a//a/} ${a///b} ${a///}", "foobr foobar foobar\n"},
 	{
 		"echo ${a:-b}; echo $a; a=; echo ${a:-b}; a=c; echo ${a:-b}",
 		"b\n\nb\nc\n",
@@ -1609,6 +1610,10 @@ var runTests = []runTest{
 	{"set -n; [[ -o noexec ]]", ""}, // actually does nothing, but oh well
 	{"[[ -o pipefail ]]", "exit status 1"},
 	{"set -o pipefail; [[ -o pipefail ]]", ""},
+	// TODO: we don't implement precedence of && over ||.
+	// {"[[ a == x && b == x || c == c ]]", ""},
+	{"[[ (a == x && b == x) || c == c ]]", ""},
+	{"[[ a == x && (b == x || c == c) ]]", "exit status 1"},
 
 	// classic test
 	{
@@ -1706,6 +1711,10 @@ var runTests = []runTest{
 	{"[ a != a ]", "exit status 1"},
 	{"[ abc = ab* ]", "exit status 1"},
 	{"[ abc != ab* ]", ""},
+	// TODO: we don't implement precedence of -a over -o.
+	// {"[ a = x -a b = x -o c = c ]", ""},
+	{`[ \( a = x -a b = x \) -o c = c ]`, ""},
+	{`[ a = x -a \( b = x -o c = c \) ]`, "exit status 1"},
 
 	// arithm
 	{
@@ -2130,6 +2139,24 @@ done <<< 2`,
 	{
 		"shopt -s foo",
 		"shopt: invalid option name \"foo\"\nexit status 1 #JUSTERR",
+	},
+	{
+		// Beware that macOS file systems are by default case-preserving but
+		// case-insensitive, so e.g. "touch x X" creates only one file.
+		"touch a ab Ac Ad; shopt -u nocaseglob; echo a*",
+		"a ab\n",
+	},
+	{
+		"touch a ab Ac Ad; shopt -s nocaseglob; echo a*",
+		"Ac Ad a ab\n",
+	},
+	{
+		"touch a ab abB Ac Ad; shopt -u nocaseglob; echo *b",
+		"ab\n",
+	},
+	{
+		"touch a ab abB Ac Ad; shopt -s nocaseglob; echo *b",
+		"ab abB\n",
 	},
 
 	// IFS
@@ -2895,6 +2922,22 @@ done <<< 2`,
 		"read -r -p 'Prompt and raw flag together: ' a <<< '\\a\\b\\c'; echo $a",
 		"Prompt and raw flag together: \\a\\b\\c\n #IGNORE bash requires a terminal",
 	},
+	{
+		`a=a; echo | (read a; echo -n "$a")`,
+		"",
+	},
+	{
+		`a=b; read a < /dev/null; echo -n "$a"`,
+		"",
+	},
+	{
+		"a=c; echo x | (read a; echo -n $a)",
+		"x",
+	},
+	{
+		"a=d; echo -n y | (read a; echo -n $a)",
+		"y",
+	},
 
 	// getopts
 	{
@@ -3542,9 +3585,7 @@ var testBuiltinsMap = map[string]func(interp.HandlerContext, []string) error{
 		if err != nil {
 			return err
 		}
-		sort.Slice(lines, func(i, j int) bool {
-			return bytes.Compare(lines[i], lines[j]) < 0
-		})
+		slices.SortFunc(lines, bytes.Compare)
 		for _, line := range lines {
 			fmt.Fprintf(hc.Stdout, "%s\n", line)
 		}
@@ -3860,6 +3901,16 @@ func TestRunnerOpts(t *testing.T) {
 			"set bar_interp_missing; echo $@",
 			"bar_interp_missing\n",
 		},
+		{
+			opts(interp.Env(expand.FuncEnviron(func(name string) string {
+				if name == "foo" {
+					return "bar"
+				}
+				return ""
+			}))),
+			"(echo $foo); echo x | echo $foo",
+			"bar\nbar\n",
+		},
 	}
 	p := syntax.NewParser()
 	for _, c := range cases {
@@ -3924,6 +3975,51 @@ func TestRunnerContext(t *testing.T) {
 				t.Fatalf("program was not killed in %s", timeout)
 			}
 		})
+	}
+}
+
+func TestCancelreader(t *testing.T) {
+	t.Parallel()
+
+	p := syntax.NewParser()
+	file := parse(t, p, "read x")
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	// Make the linter happy, even though we deliberately wait for the
+	// timeout.
+	defer cancel()
+
+	var stdinRead *os.File
+	if runtime.GOOS == "windows" {
+		// On Windows, the cancelreader only works on stdin
+		stdinRead = os.Stdin
+	} else {
+		var stdinWrite *os.File
+		var err error
+		stdinRead, stdinWrite, err = os.Pipe()
+		if err != nil {
+			t.Fatalf("Error calling os.Pipe: %v", err)
+		}
+		defer func() {
+			stdinWrite.Close()
+			stdinRead.Close()
+		}()
+	}
+	r, _ := interp.New(interp.StdIO(stdinRead, nil, nil))
+	now := time.Now()
+	errChan := make(chan error)
+	go func() {
+		errChan <- r.Run(ctx, file)
+	}()
+
+	timeout := 500 * time.Millisecond
+	select {
+	case err := <-errChan:
+		if err == nil || err.Error() != "exit status 1" || ctx.Err() != context.DeadlineExceeded {
+			t.Fatalf("'read x' did not timeout correctly; err: %v, ctx.Err(): %v; dur: %v",
+				err, ctx.Err(), time.Since(now))
+		}
+	case <-time.After(timeout):
+		t.Fatalf("program was not killed in %s", timeout)
 	}
 }
 

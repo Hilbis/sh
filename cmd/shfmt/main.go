@@ -18,8 +18,7 @@ import (
 	"strings"
 
 	maybeio "github.com/google/renameio/v2/maybe"
-	diffpkg "github.com/pkg/diff"
-	diffwrite "github.com/pkg/diff/write"
+	diffpkg "github.com/rogpeppe/go-internal/diff"
 	"golang.org/x/term"
 	"mvdan.cc/editorconfig"
 
@@ -37,11 +36,12 @@ var (
 	versionFlag = &multiFlag[bool]{"", "version", false}
 	list        = &multiFlag[bool]{"l", "list", false}
 
-	write    = &multiFlag[bool]{"w", "write", false}
-	simplify = &multiFlag[bool]{"s", "simplify", false}
-	minify   = &multiFlag[bool]{"mn", "minify", false}
-	find     = &multiFlag[bool]{"f", "find", false}
-	diff     = &multiFlag[bool]{"d", "diff", false}
+	write       = &multiFlag[bool]{"w", "write", false}
+	simplify    = &multiFlag[bool]{"s", "simplify", false}
+	minify      = &multiFlag[bool]{"mn", "minify", false}
+	find        = &multiFlag[bool]{"f", "find", false}
+	diff        = &multiFlag[bool]{"d", "diff", false}
+	applyIgnore = &multiFlag[bool]{"", "apply-ignore", false}
 
 	lang     = &multiFlag[syntax.LangVariant]{"ln", "language-dialect", syntax.LangAuto}
 	posix    = &multiFlag[bool]{"p", "posix", false}
@@ -63,17 +63,14 @@ var (
 	parser            *syntax.Parser
 	printer           *syntax.Printer
 	readBuf, writeBuf bytes.Buffer
+	color             bool
 
 	copyBuf = make([]byte, 32*1024)
-
-	in    io.Reader = os.Stdin
-	out   io.Writer = os.Stdout
-	color bool
 
 	version = "(devel)" // to match the default from runtime/debug
 
 	allFlags = []any{
-		versionFlag, list, write, simplify, minify, find, diff,
+		versionFlag, list, write, simplify, minify, find, diff, applyIgnore,
 		lang, posix, filename,
 		indent, binNext, caseIndent, spaceRedirs, keepPadding, funcNext, toJSON, fromJSON,
 	}
@@ -138,6 +135,7 @@ directory, all shell scripts found under that directory will be used.
   -d,  --diff      error with a diff when the formatting differs
   -s,  --simplify  simplify the code
   -mn, --minify    minify the code to reduce its size (implies -s)
+  --apply-ignore   always apply EditorConfig ignore rules
 
 Parser options:
 
@@ -184,10 +182,6 @@ For more information, see 'man shfmt' and https://github.com/mvdan/sh.
 	if minify.val {
 		simplify.val = true
 	}
-	// TODO(mvdan): remove sometime in 2024.
-	if os.Getenv("SHFMT_NO_EDITORCONFIG") == "true" {
-		fmt.Fprintln(os.Stderr, "SHFMT_NO_EDITORCONFIG was always undocumented; use any parser or printer flag to disable editorconfig support")
-	}
 	flag.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case lang.short, lang.long,
@@ -223,7 +217,7 @@ For more information, see 'man shfmt' and https://github.com/mvdan/sh.
 	if os.Getenv("FORCE_COLOR") != "" {
 		color = true
 	} else if os.Getenv("NO_COLOR") != "" || os.Getenv("TERM") == "dumb" {
-	} else if f, ok := out.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+	} else if term.IsTerminal(int(os.Stdout.Fd())) {
 		color = true
 	}
 	if flag.NArg() == 0 || (flag.NArg() == 1 && flag.Arg(0) == "-") {
@@ -252,12 +246,12 @@ For more information, see 'man shfmt' and https://github.com/mvdan/sh.
 	}
 	status := 0
 	for _, path := range flag.Args() {
-		if info, err := os.Stat(path); err == nil && !info.IsDir() && !find.val {
-			// When given paths to files directly, always format
-			// them, no matter their extension or shebang.
+		if info, err := os.Stat(path); err == nil && !info.IsDir() && !applyIgnore.val && !find.val {
+			// When given paths to files directly, always format them,
+			// no matter their extension or shebang.
 			//
-			// The only exception is the -f flag; in that case, we
-			// do want to report whether the file is a shell script.
+			// One exception is --apply-ignore, which explicitly changes this behavior.
+			// Another is --find, whose logic depends on walkPath being called.
 			if err := formatPath(path, false); err != nil {
 				if err != errChangedWithDiff {
 					fmt.Fprintln(os.Stderr, err)
@@ -295,7 +289,17 @@ func formatStdin(name string) error {
 	if write.val {
 		return fmt.Errorf("-w cannot be used on standard input")
 	}
-	src, err := io.ReadAll(in)
+	if applyIgnore.val {
+		// Mimic the logic from walkPath to apply the ignore rules.
+		props, err := ecQuery.Find(name, []string{"shell"})
+		if err != nil {
+			return err
+		}
+		if props.Get("ignore") == "true" {
+			return nil
+		}
+	}
+	src, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return err
 	}
@@ -319,24 +323,31 @@ func walkPath(path string, entry fs.DirEntry) error {
 	if entry.IsDir() && vcsDir.MatchString(entry.Name()) {
 		return filepath.SkipDir
 	}
-	if useEditorConfig {
-		props, err := ecQuery.Find(path)
-		if err != nil {
-			return err
-		}
-		if props.Get("ignore") == "true" {
-			if entry.IsDir() {
-				return filepath.SkipDir
-			} else {
-				return nil
-			}
+	// We don't know the language variant at this point yet, as we are walking directories
+	// and we first want to tell if we should skip a path entirely.
+	//
+	// TODO: Should the call to Find with the language name check "ignore" too, then?
+	// Otherwise a [[bash]] section with ignore=true is effectively never used.
+	//
+	// TODO: Should there be a way to explicitly turn off ignore rules when walking?
+	// Perhaps swapping the default to --apply-ignore=auto and allowing --apply-ignore=false?
+	// I don't imagine it's a particularly uesful scenario for now.
+	props, err := ecQuery.Find(path, []string{"shell"})
+	if err != nil {
+		return err
+	}
+	if props.Get("ignore") == "true" {
+		if entry.IsDir() {
+			return filepath.SkipDir
+		} else {
+			return nil
 		}
 	}
 	conf := fileutil.CouldBeScript2(entry)
 	if conf == fileutil.ConfNotScript {
 		return nil
 	}
-	err := formatPath(path, conf == fileutil.ConfIfShebang)
+	err = formatPath(path, conf == fileutil.ConfIfShebang)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -410,7 +421,7 @@ func formatPath(path string, checkShebang bool) error {
 		readBuf.Write(copyBuf[:n])
 	}
 	if find.val {
-		fmt.Fprintln(out, path)
+		fmt.Println(path)
 		return nil
 	}
 	if _, err := io.CopyBuffer(&readBuf, f, copyBuf); err != nil {
@@ -420,9 +431,23 @@ func formatPath(path string, checkShebang bool) error {
 	return formatBytes(readBuf.Bytes(), path, fileLang)
 }
 
+func editorConfigLangs(l syntax.LangVariant) []string {
+	// All known shells match [[shell]].
+	// As a special case, bash and the bash-like bats also match [[bash]]
+	// We can later consider others like [[mksh]] or [[posix-shell]],
+	// just consider what list of languages the EditorConfig spec might eventually use.
+	switch l {
+	case syntax.LangBash, syntax.LangBats:
+		return []string{"shell", "bash"}
+	case syntax.LangPOSIX, syntax.LangMirBSDKorn, syntax.LangAuto:
+		return []string{"shell"}
+	}
+	return nil
+}
+
 func formatBytes(src []byte, path string, fileLang syntax.LangVariant) error {
 	if useEditorConfig {
-		props, err := ecQuery.Find(path)
+		props, err := ecQuery.Find(path, editorConfigLangs(fileLang))
 		if err != nil {
 			return err
 		}
@@ -453,16 +478,14 @@ func formatBytes(src []byte, path string, fileLang syntax.LangVariant) error {
 		// must be standard input; fine to return
 		// TODO: change the default behavior to be compact,
 		// and allow using --to-json=pretty or --to-json=indent.
-		return typedjson.EncodeOptions{Indent: "\t"}.Encode(out, node)
+		return typedjson.EncodeOptions{Indent: "\t"}.Encode(os.Stdout, node)
 	}
 	writeBuf.Reset()
 	printer.Print(&writeBuf, node)
 	res := writeBuf.Bytes()
 	if !bytes.Equal(src, res) {
 		if list.val {
-			if _, err := fmt.Fprintln(out, path); err != nil {
-				return err
-			}
+			fmt.Println(path)
 		}
 		if write.val {
 			info, err := os.Lstat(path)
@@ -476,20 +499,46 @@ func formatBytes(src []byte, path string, fileLang syntax.LangVariant) error {
 			}
 		}
 		if diff.val {
-			opts := []diffwrite.Option{}
-			if color {
-				opts = append(opts, diffwrite.TerminalColor())
+			diffBytes := diffpkg.Diff(path+".orig", src, path, res)
+			if !color {
+				os.Stdout.Write(diffBytes)
+				return errChangedWithDiff
 			}
-			if err := diffpkg.Text(path+".orig", path, src, res, out, opts...); err != nil {
-				return fmt.Errorf("computing diff: %s", err)
+			// The first three lines are the header with the filenames, including --- and +++,
+			// and are marked in bold.
+			current := terminalBold
+			os.Stdout.WriteString(current)
+			for i, line := range bytes.SplitAfter(diffBytes, []byte("\n")) {
+				last := current
+				switch {
+				case i < 3: // the first three lines are bold
+				case bytes.HasPrefix(line, []byte("@@")):
+					current = terminalCyan
+				case bytes.HasPrefix(line, []byte("-")):
+					current = terminalRed
+				case bytes.HasPrefix(line, []byte("+")):
+					current = terminalGreen
+				default:
+					current = terminalReset
+				}
+				if current != last {
+					os.Stdout.WriteString(current)
+				}
+				os.Stdout.Write(line)
 			}
 			return errChangedWithDiff
 		}
 	}
 	if !list.val && !write.val && !diff.val {
-		if _, err := out.Write(res); err != nil {
-			return err
-		}
+		os.Stdout.Write(res)
 	}
 	return nil
 }
+
+const (
+	terminalGreen = "\u001b[32m"
+	terminalRed   = "\u001b[31m"
+	terminalCyan  = "\u001b[36m"
+	terminalReset = "\u001b[0m"
+	terminalBold  = "\u001b[1m"
+)
