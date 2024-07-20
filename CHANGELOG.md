@@ -1,5 +1,147 @@
 # Changelog
 
+## [3.7.0] - 2023-06-18
+
+- **syntax**
+  - Correctly parse `$foo#bar` as a single word - #1003
+  - Make `&>` redirect operators an error in POSIX mode - #991
+  - Avoid producing invalid shell when minifying some heredocs - #923
+  - Revert the simplification of `${foo:-}` into `${foo-}` - #970
+- **interp**
+  - Add `ExecHandlers` to support layering multiple middlewares - #964
+  - Add initial support for the `select` clause - #969
+  - Support combining the `errexit` and `pipefail` options - #870
+  - Set `EUID` just like `UID` - #958
+  - Replace panics on unimplemented builtins with errors - #999
+  - Tweak build tags to support building for `js/wasm` - #983
+- **syntax/typedjson**
+  - Avoid `reflect.Value.MethodByName` to reduce binary sizes - #961
+
+## [3.6.0] - 2022-12-11
+
+This release drops support for Go 1.17 and includes many features and fixes.
+
+- **cmd/shfmt**
+  - Implement `--from-json` as the reverse of `--to-json` - [#900]
+  - Improve the quality of the `--to-json` output - [#900]
+  - Provide detected language when erroring with `-ln=auto` - [#803]
+- **syntax**
+  - Don't require peeking two bytes after `echo *` - [#835]
+  - Simplify `${name:-}` to the equivalent `${name-}` - [#849]
+  - Don't print trailing whitespaces on nested subshells - [#814]
+  - Don't print extra newlines in some case clauses - [#779]
+  - Don't indent comments preceding case clause items - [#917]
+  - Allow escaped newlines before unquoted words again - [#873]
+  - Parse a redirections edge case without spaces - [#879]
+  - Give a helpful error when `<<<` is used in POSIX mode - [#881]
+  - Forbid `${!foo*}` and `${!foo@}` in mksh mode - [#929]
+  - Batch allocations less aggressively in the parser
+- **syntax/typedjson**
+  - Expose `--from-json` and `--to-json` as Go APIs - [#885]
+- **expand**
+  - Improve support for expanding array keys and values - [#884]
+  - Don't panic on unsupported syntax nodes - [#841]
+  - Don't panic on division by zero - [#892]
+  - Properly expand unquoted parameters with spaces - [#886]
+  - Trim spaces when converting strings to integers - [#928]
+- **interp**
+  - Add initial implementation for `mapfile` and `readarray` - [#863]
+  - Improve matching patterns against multiple lines - [#866]
+  - Support `%b` in the `printf` builtin - [#955]
+  - Display all Bash options in `shopt` - [#877]
+- **pattern**
+  - Add `EntireString` to match the entire string using `^$` - [#866]
+
+## [3.5.1] - 2022-05-23
+
+- **cmd/shfmt**
+  - Fix the Docker publishing script bug which broke 3.5.0 - [#860]
+- **interp**
+  - Support multi-line strings when pattern matching in `[[` - [#861]
+  - Invalid glob words are no longer removed with `nullglob` - [#862]
+- **pattern**
+  - `Regexp` now returns the typed error `SyntaxError` - [#862]
+
+## [3.5.0] - 2022-05-11
+
+This release drops support for Go 1.16 and includes many new features.
+
+- **cmd/shfmt**
+  - Switch to `-ln=auto` by default to detect the shell language
+  - Add support for long flags, like `--indent` for `-i`
+- **syntax**
+  - Allow extglob wildcards as function names like `@() { ... }`
+  - Add support for heredocs surrounded by backquotes
+  - Add support for backquoted inline comments
+  - Add `NewPos` to create `Pos` values externally
+  - Support escaped newlines with CRLF line endings
+  - `Minify` no longer omits a leading shebang comment
+  - Avoid printing escaped newlines in non-quoted words
+  - Fix some printer edge cases where comments weren't properly spaced
+- **fileutil**
+  - Add `Shebang` to extract the shell language from a `#!` line
+- **expand**
+  - Reimplement globstar `**` globbing for correctness
+  - Replace `os.Stat` as the last direct use of the filesystem
+- **interp**
+  - Add `CallHandler` to intercept all interpreted `CallExpr` nodes
+  - Add `ReadDirHandler` to intercept glob expansion filesystem reads
+  - Add `StatHandler` to intercept `os.Stat` and `os.Lstat` calls
+  - Always surface exit codes from command substitutions
+  - Add initial and incomplete support for `set -x`
+  - Add support for `cd -` as `cd "$OLDPWD"`
+  - Avoid panic on `set - args`
+
+## [3.4.3] - 2022-02-19
+
+- **cmd/shfmt**
+  - New Docker `v3` tag to track the latest stable version
+  - Don't duplicate errors when walking directories
+- **interp**
+  - Properly handle empty paths in the `test` builtin
+  - Allow unsetting global vars from inside a function again
+  - Use `%w` to wrap errors in `Dir`
+
+## [3.4.2] - 2021-12-24
+
+- The tests no longer assume what locales are installed
+- **interp**
+  - Keep `PATH` list separators OS-specific to fix a recent regression
+  - Avoid negative elapsed durations in the `time` builtin
+
+## [3.4.1] - 2021-11-23
+
+- **syntax**
+  - Don't return an empty string on empty input to `Quote`
+- **expand**
+  - Properly sort in `ListEnviron` to avoid common prefix issues
+- **interp**
+  - `export` used in functions now affects the global scope
+  - Support looking for scripts in `$PATH` in `source`
+  - Properly slice arrays in parameter expansions
+
+## [3.4.0] - 2021-10-01
+
+This release drops support for Go 1.15,
+which allows the code to start benefitting from `io/fs`.
+
+- **cmd/shfmt**
+  - Walks directories ~10% faster thanks to `filepath.WalkDir`
+- **syntax**
+  - Add `Quote` to mirror `strconv.Quote` for shell syntax
+  - Skip null characters when parsing, just like Bash
+  - Rewrite fuzzers with Go 1.18's native fuzzing
+- **fileutil**
+  - Add `CouldBeScript2` using `io/fs.DirEntry`
+- **expand**
+  - Skip or stop at null characters, just like Bash
+- **interp**
+  - Set `GID` just like `UID`
+  - Add support for `read -p`
+  - Add support for `pwd` flags
+  - Create random FIFOs for process substitutions more robustly
+  - Avoid leaking an open file when interpreting `$(<file)`
+
 ## [3.3.1] - 2021-08-01
 
 - **syntax**
@@ -55,7 +197,7 @@
 ## [3.2.0] - 2020-10-29
 
 - **cmd/shfmt**
-  - Add a man page via [scdoc](https://sr.ht/~sircmpwn/scdoc); see [shfmt.1.scd](cmd/shfmt/shfmt.1.scd)
+  - Add a man page via [scdoc](https://sr.ht/~sircmpwn/scdoc/); see [shfmt.1.scd](cmd/shfmt/shfmt.1.scd)
   - Add `-filename` to give a name to standard input
 - **syntax**
   - Add initial support for [Bats](https://github.com/bats-core/bats-core)
@@ -68,7 +210,7 @@
   - Obey print options inside `<<-` heredocs
   - Don't simplify indexed parameter expansions in arithmetic expressions
   - Improve parsing errors for missing test expressions
-  - `LangVariant` now implements [flag.Value](https://golang.org/pkg/flag/#Value)
+  - `LangVariant` now implements [flag.Value](https://pkg.go.dev/flag#Value)
 - **interp**
   - Avoid panic on C-style loops which omit expressions
   - `$@` and `$*` always exist, so `"$@"` can expand to zero words
@@ -532,6 +674,41 @@ module in v3.
 
 Initial release.
 
+[3.7.0]: https://github.com/mvdan/sh/releases/tag/v3.7.0
+
+[3.6.0]: https://github.com/mvdan/sh/releases/tag/v3.6.0
+[#779]: https://github.com/mvdan/sh/issues/779
+[#803]: https://github.com/mvdan/sh/issues/803
+[#814]: https://github.com/mvdan/sh/issues/814
+[#835]: https://github.com/mvdan/sh/issues/835
+[#841]: https://github.com/mvdan/sh/issues/841
+[#849]: https://github.com/mvdan/sh/pull/849
+[#863]: https://github.com/mvdan/sh/pull/863
+[#866]: https://github.com/mvdan/sh/pull/866
+[#873]: https://github.com/mvdan/sh/issues/873
+[#877]: https://github.com/mvdan/sh/issues/877
+[#879]: https://github.com/mvdan/sh/pull/879
+[#881]: https://github.com/mvdan/sh/issues/881
+[#884]: https://github.com/mvdan/sh/issues/884
+[#885]: https://github.com/mvdan/sh/issues/885
+[#886]: https://github.com/mvdan/sh/issues/886
+[#892]: https://github.com/mvdan/sh/issues/892
+[#900]: https://github.com/mvdan/sh/pull/900
+[#917]: https://github.com/mvdan/sh/pull/917
+[#928]: https://github.com/mvdan/sh/issues/928
+[#929]: https://github.com/mvdan/sh/pull/929
+[#955]: https://github.com/mvdan/sh/pull/955
+
+[3.5.1]: https://github.com/mvdan/sh/releases/tag/v3.5.1
+[#860]: https://github.com/mvdan/sh/issues/860
+[#861]: https://github.com/mvdan/sh/pull/861
+[#862]: https://github.com/mvdan/sh/pull/862
+
+[3.5.0]: https://github.com/mvdan/sh/releases/tag/v3.5.0
+[3.4.3]: https://github.com/mvdan/sh/releases/tag/v3.4.3
+[3.4.2]: https://github.com/mvdan/sh/releases/tag/v3.4.2
+[3.4.1]: https://github.com/mvdan/sh/releases/tag/v3.4.1
+[3.4.0]: https://github.com/mvdan/sh/releases/tag/v3.4.0
 [3.3.1]: https://github.com/mvdan/sh/releases/tag/v3.3.1
 [3.3.0]: https://github.com/mvdan/sh/releases/tag/v3.3.0
 [3.2.4]: https://github.com/mvdan/sh/releases/tag/v3.2.4

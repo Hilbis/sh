@@ -6,7 +6,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"testing"
 
 	"mvdan.cc/sh/v3/interp"
@@ -142,6 +141,16 @@ var interactiveTests = []struct {
 	},
 	{
 		pairs: []string{
+			"echo *; :\n",
+			"main.go main_test.go\n$ ",
+			"echo *\n",
+			"main.go main_test.go\n$ ",
+			"shopt -s globstar; echo **\n",
+			"main.go main_test.go\n$ ",
+		},
+	},
+	{
+		pairs: []string{
 			"echo foo; exit 0; echo bar\n",
 			"foo\n",
 			"echo baz\n",
@@ -168,8 +177,8 @@ var interactiveTests = []struct {
 
 func TestInteractive(t *testing.T) {
 	t.Parallel()
-	for i, tc := range interactiveTests {
-		t.Run(fmt.Sprintf("%02d", i), func(t *testing.T) {
+	for _, tc := range interactiveTests {
+		t.Run("", func(t *testing.T) {
 			inReader, inWriter := io.Pipe()
 			outReader, outWriter := io.Pipe()
 			runner, _ := interp.New(interp.StdIO(inReader, outWriter, outWriter))
@@ -177,7 +186,7 @@ func TestInteractive(t *testing.T) {
 			go func() {
 				errc <- runInteractive(runner, inReader, outWriter, outWriter)
 				// Discard the rest of the input.
-				io.Copy(ioutil.Discard, inReader)
+				io.Copy(io.Discard, inReader)
 			}()
 
 			if err := readString(outReader, "$ "); err != nil {
@@ -186,9 +195,11 @@ func TestInteractive(t *testing.T) {
 
 			line := 1
 			for len(tc.pairs) > 0 {
+				t.Logf("write %q", tc.pairs[0])
 				if _, err := io.WriteString(inWriter, tc.pairs[0]); err != nil {
 					t.Fatal(err)
 				}
+				t.Logf("read %q", tc.pairs[1])
 				if err := readString(outReader, tc.pairs[1]); err != nil {
 					t.Fatal(err)
 				}
@@ -218,7 +229,7 @@ func TestInteractiveExit(t *testing.T) {
 	inReader, inWriter := io.Pipe()
 	defer inReader.Close()
 	go io.WriteString(inWriter, "exit\n")
-	w := ioutil.Discard
+	w := io.Discard
 	runner, _ := interp.New(interp.StdIO(inReader, w, w))
 	if err := runInteractive(runner, inReader, w, w); err != nil {
 		t.Fatal("expected a nil error")

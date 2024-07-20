@@ -1,10 +1,9 @@
 // Copyright (c) 2019, Daniel Martí <mvdan@mvdan.cc>
 // See LICENSE for licensing information
 
-//go:build !windows
-// +build !windows
+//go:build unix
 
-package interp
+package interp_test
 
 import (
 	"bufio"
@@ -16,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/creack/pty"
+	"mvdan.cc/sh/v3/interp"
 )
 
 func TestRunnerTerminalStdIO(t *testing.T) {
@@ -53,7 +53,7 @@ func TestRunnerTerminalStdIO(t *testing.T) {
 			// some secondary ends can be used as stdin too
 			secondaryReader, _ := secondary.(io.Reader)
 
-			r, _ := New(StdIO(secondaryReader, secondary, secondary))
+			r, _ := interp.New(interp.StdIO(secondaryReader, secondary, secondary))
 			go func() {
 				// To mimic os/exec.Cmd.Start, use a goroutine.
 				if err := r.Run(context.Background(), file); err != nil {

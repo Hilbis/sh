@@ -60,7 +60,7 @@ const (
 // and a value.
 //
 // A Variable is unset if its Kind field is Unset, which can be checked via
-// Variable.IsSet. The zero value of a Variable is thus a valid unset variable.
+// [Variable.IsSet]. The zero value of a Variable is thus a valid unset variable.
 //
 // If a variable is set, its Value field will be a []string if it is an indexed
 // array, a map[string]string if it's an associative array, or a string
@@ -168,9 +168,13 @@ func listEnvironWithUpper(upper bool, pairs ...string) Environ {
 		jsep := strings.IndexByte(list[j], '=')
 		if isep < 0 {
 			isep = 0
+		} else {
+			isep += 1
 		}
 		if jsep < 0 {
 			jsep = 0
+		} else {
+			jsep += 1
 		}
 		return list[i][:isep] < list[j][:jsep]
 	})

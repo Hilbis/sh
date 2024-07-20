@@ -5,7 +5,6 @@ package expand
 
 import (
 	"bytes"
-	"fmt"
 	"testing"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -150,8 +149,8 @@ var braceTests = []struct {
 
 func TestBraces(t *testing.T) {
 	t.Parallel()
-	for i, tc := range braceTests {
-		t.Run(fmt.Sprintf("%02d", i), func(t *testing.T) {
+	for _, tc := range braceTests {
+		t.Run("", func(t *testing.T) {
 			inStr := printWords(tc.in)
 			wantStr := printWords(tc.want...)
 			wantBraceExpParts(t, tc.in, false)
@@ -172,15 +171,15 @@ func TestBraces(t *testing.T) {
 
 func wantBraceExpParts(t *testing.T, word *syntax.Word, want bool) {
 	t.Helper()
-	any := false
+	anyBrace := false
 	for _, part := range word.Parts {
-		if _, any = part.(*syntax.BraceExp); any {
+		if _, anyBrace = part.(*syntax.BraceExp); anyBrace {
 			break
 		}
 	}
-	if any && !want {
+	if anyBrace && !want {
 		t.Fatalf("didn't want any BraceExp node, but found one")
-	} else if !any && want {
+	} else if !anyBrace && want {
 		t.Fatalf("wanted a BraceExp node, but found none")
 	}
 }

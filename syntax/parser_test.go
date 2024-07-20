@@ -10,25 +10,26 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 
-	"github.com/kr/pretty"
+	"github.com/google/go-cmp/cmp"
 )
 
-func TestKeepComments(t *testing.T) {
+func TestParseBashKeepComments(t *testing.T) {
 	t.Parallel()
-	in := "# foo\ncmd\n# bar"
-	want := &File{
-		Stmts: []*Stmt{{
-			Comments: []Comment{{Text: " foo"}},
-			Cmd:      litCall("cmd"),
-		}},
-		Last: []Comment{{Text: " bar"}},
+	p := NewParser(KeepComments(true))
+	for i, c := range fileTestsKeepComments {
+		want := c.Bash
+		if want == nil {
+			continue
+		}
+		for j, in := range c.Strs {
+			t.Run(fmt.Sprintf("#%03d-%d", i, j), singleParse(p, in, want))
+		}
 	}
-	singleParse(NewParser(KeepComments(true)), in, want)(t)
 }
 
 func TestParseBash(t *testing.T) {
@@ -40,7 +41,7 @@ func TestParseBash(t *testing.T) {
 			continue
 		}
 		for j, in := range c.Strs {
-			t.Run(fmt.Sprintf("%03d-%d", i, j), singleParse(p, in, want))
+			t.Run(fmt.Sprintf("#%03d-%d", i, j), singleParse(p, in, want))
 		}
 	}
 }
@@ -117,7 +118,7 @@ func TestParsePosix(t *testing.T) {
 			continue
 		}
 		for j, in := range c.Strs {
-			t.Run(fmt.Sprintf("%03d-%d", i, j),
+			t.Run(fmt.Sprintf("#%03d-%d", i, j),
 				singleParse(p, in, want))
 		}
 	}
@@ -132,7 +133,7 @@ func TestParseMirBSDKorn(t *testing.T) {
 			continue
 		}
 		for j, in := range c.Strs {
-			t.Run(fmt.Sprintf("%03d-%d", i, j),
+			t.Run(fmt.Sprintf("#%03d-%d", i, j),
 				singleParse(p, in, want))
 		}
 	}
@@ -147,28 +148,60 @@ func TestParseBats(t *testing.T) {
 			continue
 		}
 		for j, in := range c.Strs {
-			t.Run(fmt.Sprintf("%03d-%d", i, j),
+			t.Run(fmt.Sprintf("#%03d-%d", i, j),
 				singleParse(p, in, want))
 		}
 	}
 }
 
+func TestMain(m *testing.M) {
+	// Set the locale to computer-friendly English and UTF-8, C.UTF-8,
+	// which started shipping with glibc 2.35 in February 2022.
+	os.Setenv("LANGUAGE", "C.UTF-8")
+	os.Setenv("LC_ALL", "C.UTF-8")
+	os.Exit(m.Run())
+}
+
 var (
-	hasBash51  bool
-	hasDash059 bool
-	hasMksh59  bool
+	storedHasBash51 bool
+	onceHasBash51   sync.Once
+
+	storedHasDash059 bool
+	onceHasDash059   sync.Once
+
+	storedHasMksh59 bool
+	onceHasMksh59   sync.Once
 )
 
-func TestMain(m *testing.M) {
-	os.Setenv("LANGUAGE", "en_US.UTF8")
-	os.Setenv("LC_ALL", "en_US.UTF8")
-	hasBash51 = cmdContains("version 5.1", "bash", "--version")
+func hasBash51(tb testing.TB) {
+	onceHasBash51.Do(func() {
+		storedHasBash51 = cmdContains("version 5.1", "bash", "--version")
+	})
+	if !storedHasBash51 {
+		tb.Skipf("bash 5.1 required to run")
+	}
+}
+
+func hasDash059(tb testing.TB) {
 	// dash provides no way to check its version, so we have to
 	// check if it's new enough as to not have the bug that breaks
-	// our integration tests. Blergh.
-	hasDash059 = cmdContains("Bad subst", "dash", "-c", "echo ${#<}")
-	hasMksh59 = cmdContains(" R59 ", "mksh", "-c", "echo $KSH_VERSION")
-	os.Exit(m.Run())
+	// our integration tests.
+	// This also means our check does not require a specific version.
+	onceHasDash059.Do(func() {
+		storedHasDash059 = cmdContains("Bad subst", "dash", "-c", "echo ${#<}")
+	})
+	if !storedHasDash059 {
+		tb.Skipf("dash 0.5.9+ required to run")
+	}
+}
+
+func hasMksh59(tb testing.TB) {
+	onceHasMksh59.Do(func() {
+		storedHasMksh59 = cmdContains(" R59 ", "mksh", "-c", "echo $KSH_VERSION")
+	})
+	if !storedHasMksh59 {
+		tb.Skipf("mksh 59 required to run")
+	}
 }
 
 func cmdContains(substr, cmd string, args ...string) bool {
@@ -184,8 +217,12 @@ var extGlobRe = regexp.MustCompile(`[@?*+!]\(`)
 
 func confirmParse(in, cmd string, wantErr bool) func(*testing.T) {
 	return func(t *testing.T) {
+		t.Helper()
 		t.Parallel()
 		var opts []string
+		if strings.Contains(in, "\\\r\n") {
+			t.Skip("shells do not generally support CRLF line endings")
+		}
 		if cmd == "bash" && extGlobRe.MatchString(in) {
 			// otherwise bash refuses to parse these
 			// properly. Also avoid -n since that too makes
@@ -195,24 +232,22 @@ func confirmParse(in, cmd string, wantErr bool) func(*testing.T) {
 			// -n makes bash accept invalid inputs like
 			// "let" or "`{`", so only use it in
 			// non-erroring tests. Should be safe to not use
-			// -n anyway since these are supposed to just
-			// fail.
+			// -n anyway since these are supposed to just fail.
 			// also, -n will break if we are using extglob
 			// as extglob is not actually applied.
 			opts = append(opts, "-n")
 		}
 		cmd := exec.Command(cmd, opts...)
+		cmd.Dir = t.TempDir() // to be safe
 		cmd.Stdin = strings.NewReader(in)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		err := cmd.Run()
 		if stderr.Len() > 0 {
 			// bash sometimes likes to error on an input via stderr
-			// while forgetting to set the exit code to non-zero.
-			// Fun.
-			if s := stderr.String(); !strings.Contains(s, ": warning: ") {
-				err = errors.New(s)
-			}
+			// while forgetting to set the exit code to non-zero. Fun.
+			// Note that we also treat warnings as errors.
+			err = errors.New(stderr.String())
 		}
 		if err != nil && strings.Contains(err.Error(), "command not found") {
 			err = nil
@@ -229,16 +264,14 @@ func TestParseBashConfirm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("calling bash is slow.")
 	}
-	if !hasBash51 {
-		t.Skip("bash 5.1 required to run")
-	}
+	hasBash51(t)
 	i := 0
 	for _, c := range append(fileTests, fileTestsNoPrint...) {
 		if c.Bash == nil {
 			continue
 		}
 		for j, in := range c.Strs {
-			t.Run(fmt.Sprintf("%03d-%d", i, j),
+			t.Run(fmt.Sprintf("#%03d-%d", i, j),
 				confirmParse(in, "bash", false))
 		}
 		i++
@@ -249,16 +282,14 @@ func TestParsePosixConfirm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("calling dash is slow.")
 	}
-	if !hasDash059 {
-		t.Skip("dash 0.5.9 or newer required to run")
-	}
+	hasDash059(t)
 	i := 0
 	for _, c := range append(fileTests, fileTestsNoPrint...) {
 		if c.Posix == nil {
 			continue
 		}
 		for j, in := range c.Strs {
-			t.Run(fmt.Sprintf("%03d-%d", i, j),
+			t.Run(fmt.Sprintf("#%03d-%d", i, j),
 				confirmParse(in, "dash", false))
 		}
 		i++
@@ -269,16 +300,14 @@ func TestParseMirBSDKornConfirm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("calling mksh is slow.")
 	}
-	if !hasMksh59 {
-		t.Skip("mksh 59 required to run")
-	}
+	hasMksh59(t)
 	i := 0
 	for _, c := range append(fileTests, fileTestsNoPrint...) {
 		if c.MirBSDKorn == nil {
 			continue
 		}
 		for j, in := range c.Strs {
-			t.Run(fmt.Sprintf("%03d-%d", i, j),
+			t.Run(fmt.Sprintf("#%03d-%d", i, j),
 				confirmParse(in, "mksh", false))
 		}
 		i++
@@ -289,10 +318,7 @@ func TestParseErrBashConfirm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("calling bash is slow.")
 	}
-	if !hasBash51 {
-		t.Skip("bash 5.1 required to run")
-	}
-	i := 0
+	hasBash51(t)
 	for _, c := range shellTests {
 		want := c.common
 		if c.bsmk != nil {
@@ -305,8 +331,7 @@ func TestParseErrBashConfirm(t *testing.T) {
 			continue
 		}
 		wantErr := !strings.Contains(want.(string), " #NOERR")
-		t.Run(fmt.Sprintf("%03d", i), confirmParse(c.in, "bash", wantErr))
-		i++
+		t.Run("", confirmParse(c.in, "bash", wantErr))
 	}
 }
 
@@ -314,10 +339,7 @@ func TestParseErrPosixConfirm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("calling dash is slow.")
 	}
-	if !hasDash059 {
-		t.Skip("dash 0.5.9 or newer required to run")
-	}
-	i := 0
+	hasDash059(t)
 	for _, c := range shellTests {
 		want := c.common
 		if c.posix != nil {
@@ -327,8 +349,7 @@ func TestParseErrPosixConfirm(t *testing.T) {
 			continue
 		}
 		wantErr := !strings.Contains(want.(string), " #NOERR")
-		t.Run(fmt.Sprintf("%03d", i), confirmParse(c.in, "dash", wantErr))
-		i++
+		t.Run("", confirmParse(c.in, "dash", wantErr))
 	}
 }
 
@@ -336,10 +357,7 @@ func TestParseErrMirBSDKornConfirm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("calling mksh is slow.")
 	}
-	if !hasMksh59 {
-		t.Skip("mksh 59 required to run")
-	}
-	i := 0
+	hasMksh59(t)
 	for _, c := range shellTests {
 		want := c.common
 		if c.bsmk != nil {
@@ -352,10 +370,11 @@ func TestParseErrMirBSDKornConfirm(t *testing.T) {
 			continue
 		}
 		wantErr := !strings.Contains(want.(string), " #NOERR")
-		t.Run(fmt.Sprintf("%03d", i), confirmParse(c.in, "mksh", wantErr))
-		i++
+		t.Run("", confirmParse(c.in, "mksh", wantErr))
 	}
 }
+
+var cmpOpt = cmp.FilterValues(func(p1, p2 Pos) bool { return true }, cmp.Ignore())
 
 func singleParse(p *Parser, in string, want *File) func(t *testing.T) {
 	return func(t *testing.T) {
@@ -364,10 +383,9 @@ func singleParse(p *Parser, in string, want *File) func(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Unexpected error in %q: %v", in, err)
 		}
-		clearPosRecurse(t, in, got)
-		if !reflect.DeepEqual(got, want) {
-			t.Fatalf("syntax tree mismatch in %q\ndiff:\n%s", in,
-				strings.Join(pretty.Diff(want, got), "\n"))
+		recursiveSanityCheck(t, in, got)
+		if diff := cmp.Diff(want, got, cmpOpt); diff != "" {
+			t.Errorf("syntax tree mismatch in %q (-want +got):\n%s", in, diff)
 		}
 	}
 }
@@ -401,9 +419,9 @@ func BenchmarkParse(b *testing.B) {
 
 type errorCase struct {
 	in          string
-	common      interface{}
-	bash, posix interface{}
-	bsmk, mksh  interface{}
+	common      any
+	bash, posix any
+	bsmk, mksh  any
 }
 
 var shellTests = []errorCase{
@@ -784,23 +802,31 @@ var shellTests = []errorCase{
 		common: `1:9: > must be followed by a word`,
 	},
 	{
+		in:    "foo &>/dev/null",
+		posix: `1:5: &> redirects are a bash/mksh feature`,
+	},
+	{
+		in:    "foo &>>/dev/null",
+		posix: `1:5: &> redirects are a bash/mksh feature`,
+	},
+	{
 		in:     "<<",
 		common: `1:1: << must be followed by a word`,
 	},
 	{
 		in:     "<<EOF",
 		common: `1:1: unclosed here-document 'EOF' #NOERR`,
-		mksh:   `1:1: unclosed here-document 'EOF'`,
+		bsmk:   `1:1: unclosed here-document 'EOF'`,
 	},
 	{
 		in:     "<<EOF\n\\",
 		common: `1:1: unclosed here-document 'EOF' #NOERR`,
-		mksh:   `1:1: unclosed here-document 'EOF'`,
+		bsmk:   `1:1: unclosed here-document 'EOF'`,
 	},
 	{
 		in:     "<<EOF\n\\\n",
 		common: `1:1: unclosed here-document 'EOF' #NOERR`,
-		mksh:   `1:1: unclosed here-document 'EOF'`,
+		bsmk:   `1:1: unclosed here-document 'EOF'`,
 	},
 	{
 		in: "<<EOF\n\\\nEOF",
@@ -810,51 +836,58 @@ var shellTests = []errorCase{
 	{
 		in:     "<<EOF\nfoo\\\nEOF",
 		common: `1:1: unclosed here-document 'EOF' #NOERR`,
-		mksh:   `1:1: unclosed here-document 'EOF'`,
+		bsmk:   `1:1: unclosed here-document 'EOF'`,
 	},
 	{
 		in:     "<<'EOF'\n\\\n",
 		common: `1:1: unclosed here-document 'EOF' #NOERR`,
-		mksh:   `1:1: unclosed here-document 'EOF'`,
+		bsmk:   `1:1: unclosed here-document 'EOF'`,
 	},
 	{
 		in:     "<<EOF <`\n#\n`\n``",
 		common: `1:1: unclosed here-document 'EOF'`,
-		mksh:   `1:1: unclosed here-document 'EOF'`,
 	},
 	{
 		in:     "<<'EOF'",
 		common: `1:1: unclosed here-document 'EOF' #NOERR`,
-		mksh:   `1:1: unclosed here-document 'EOF'`,
+		bsmk:   `1:1: unclosed here-document 'EOF'`,
 	},
 	{
 		in:     "<<\\EOF",
 		common: `1:1: unclosed here-document 'EOF' #NOERR`,
-		mksh:   `1:1: unclosed here-document 'EOF'`,
+		bsmk:   `1:1: unclosed here-document 'EOF'`,
 	},
 	{
 		in:     "<<\\\\EOF",
 		common: `1:1: unclosed here-document '\EOF' #NOERR`,
-		mksh:   `1:1: unclosed here-document '\EOF'`,
+		bsmk:   `1:1: unclosed here-document '\EOF'`,
 	},
 	{
 		in:     "<<-EOF",
 		common: `1:1: unclosed here-document 'EOF' #NOERR`,
-		mksh:   `1:1: unclosed here-document 'EOF'`,
+		bsmk:   `1:1: unclosed here-document 'EOF'`,
 	},
 	{
 		in:     "<<-EOF\n\t",
 		common: `1:1: unclosed here-document 'EOF' #NOERR`,
-		mksh:   `1:1: unclosed here-document 'EOF'`,
+		bsmk:   `1:1: unclosed here-document 'EOF'`,
 	},
 	{
 		in:     "<<-'EOF'\n\t",
 		common: `1:1: unclosed here-document 'EOF' #NOERR`,
-		mksh:   `1:1: unclosed here-document 'EOF'`,
+		bsmk:   `1:1: unclosed here-document 'EOF'`,
 	},
 	{
 		in:     "<<\nEOF\nbar\nEOF",
 		common: `1:1: << must be followed by a word`,
+	},
+	{
+		in:   "$(<<EOF\nNOTEOF)",
+		bsmk: `1:3: unclosed here-document 'EOF'`,
+	},
+	{
+		in:   "`<<EOF\nNOTEOF`",
+		bsmk: `1:2: unclosed here-document 'EOF'`,
 	},
 	{
 		in:     "if",
@@ -1294,7 +1327,7 @@ var shellTests = []errorCase{
 	},
 	{
 		in:     "`\"`",
-		common: "1:3: reached EOF without closing quote `",
+		common: "1:2: reached ` without closing quote \"",
 	},
 	{
 		in:     "`\\```",
@@ -1317,11 +1350,19 @@ var shellTests = []errorCase{
 		in:     "<<${bar}\n${bar}",
 		common: `1:3: expansions not allowed in heredoc words #NOERR`,
 	},
+
+	// bash uses "$(bar)" as the closing word, but other shells use "$".
+	// We instead give an error for expansions in heredoc words.
 	{
 		in:    "<<$(bar)\n$",
-		bsmk:  `1:3: expansions not allowed in heredoc words #NOERR`,
 		posix: `1:3: expansions not allowed in heredoc words`,
+		mksh:  `1:3: expansions not allowed in heredoc words #NOERR`,
 	},
+	{
+		in:   "<<$(bar)\n$(bar)",
+		bash: `1:3: expansions not allowed in heredoc words #NOERR`,
+	},
+
 	{
 		in:     "<<$-\n$-",
 		common: `1:3: expansions not allowed in heredoc words #NOERR`,
@@ -1815,7 +1856,19 @@ var shellTests = []errorCase{
 	},
 	{
 		in:    "function foo() { bar; }",
-		posix: `1:13: a command can only contain words and redirects; encountered (`,
+		posix: `1:13: the "function" builtin is a bash feature; tried parsing as posix`,
+	},
+	{
+		in:    "function foo { bar; }",
+		posix: `1:14: the "function" builtin is a bash feature; tried parsing as posix`,
+	},
+	{
+		in:    "declare foo=(bar)",
+		posix: `1:13: the "declare" builtin is a bash feature; tried parsing as posix`,
+	},
+	{
+		in:    "let foo=(bar)",
+		posix: `1:9: the "let" builtin is a bash feature; tried parsing as posix`,
 	},
 	{
 		in:    "echo <(",
@@ -1877,7 +1930,21 @@ var shellTests = []errorCase{
 	},
 	{
 		in:    "echo ${!foo}",
-		posix: `1:8: ${!foo} is a bash/mksh feature`,
+		posix: `1:6: "${!foo}" is a bash/mksh feature`,
+	},
+	{
+		in:    "echo ${!foo*}",
+		posix: `1:6: "${!foo*}" is a bash feature`,
+		mksh:  `1:6: "${!foo*}" is a bash feature`,
+	},
+	{
+		in:    "echo ${!foo@}",
+		posix: `1:12: this expansion operator is a bash/mksh feature`,
+		mksh:  `1:6: "${!foo@}" is a bash feature`,
+	},
+	{
+		in:    "echo ${!foo[@]}",
+		posix: `1:12: arrays are a bash/mksh feature`,
 	},
 	{
 		in:    "echo ${foo[1]}",
@@ -1890,6 +1957,14 @@ var shellTests = []errorCase{
 	{
 		in:    "echo ${foo:1}",
 		posix: `1:11: slicing is a bash/mksh feature`,
+	},
+	{
+		in:    "foo <<< bar",
+		posix: `1:5: herestrings are a bash/mksh feature`,
+	},
+	{
+		in:    "foo << < bar",
+		posix: `1:5: << must be followed by a word`,
 	},
 	{
 		in:    "echo ${foo,bar}",
@@ -1938,7 +2013,7 @@ var shellTests = []errorCase{
 	},
 	{
 		in:     "`\"`\\",
-		common: "1:3: reached EOF without closing quote `",
+		common: "1:2: reached ` without closing quote \"",
 	},
 }
 
@@ -1961,7 +2036,6 @@ func checkError(p *Parser, in, want string) func(*testing.T) {
 func TestParseErrPosix(t *testing.T) {
 	t.Parallel()
 	p := NewParser(KeepComments(true), Variant(LangPOSIX))
-	i := 0
 	for _, c := range shellTests {
 		want := c.common
 		if c.posix != nil {
@@ -1970,15 +2044,13 @@ func TestParseErrPosix(t *testing.T) {
 		if want == nil {
 			continue
 		}
-		t.Run(fmt.Sprintf("%03d", i), checkError(p, c.in, want.(string)))
-		i++
+		t.Run("", checkError(p, c.in, want.(string)))
 	}
 }
 
 func TestParseErrBash(t *testing.T) {
 	t.Parallel()
 	p := NewParser(KeepComments(true))
-	i := 0
 	for _, c := range shellTests {
 		want := c.common
 		if c.bsmk != nil {
@@ -1990,15 +2062,13 @@ func TestParseErrBash(t *testing.T) {
 		if want == nil {
 			continue
 		}
-		t.Run(fmt.Sprintf("%03d", i), checkError(p, c.in, want.(string)))
-		i++
+		t.Run("", checkError(p, c.in, want.(string)))
 	}
 }
 
 func TestParseErrMirBSDKorn(t *testing.T) {
 	t.Parallel()
 	p := NewParser(KeepComments(true), Variant(LangMirBSDKorn))
-	i := 0
 	for _, c := range shellTests {
 		want := c.common
 		if c.bsmk != nil {
@@ -2010,8 +2080,7 @@ func TestParseErrMirBSDKorn(t *testing.T) {
 		if want == nil {
 			continue
 		}
-		t.Run(fmt.Sprintf("%03d", i), checkError(p, c.in, want.(string)))
-		i++
+		t.Run("", checkError(p, c.in, want.(string)))
 	}
 }
 
@@ -2226,17 +2295,16 @@ func TestParseDocument(t *testing.T) {
 	t.Parallel()
 	p := NewParser()
 
-	for i, tc := range documentTests {
-		t.Run(fmt.Sprintf("%02d", i), func(t *testing.T) {
+	for _, tc := range documentTests {
+		t.Run("", func(t *testing.T) {
 			got, err := p.Document(strings.NewReader(tc.in))
 			if err != nil {
 				t.Fatal(err)
 			}
-			clearPosRecurse(t, "", got)
+			recursiveSanityCheck(t, "", got)
 			want := &Word{Parts: tc.want}
-			if !reflect.DeepEqual(got, want) {
-				t.Fatalf("syntax tree mismatch in %q\ndiff:\n%s", tc.in,
-					strings.Join(pretty.Diff(want, got), "\n"))
+			if diff := cmp.Diff(want, got, cmpOpt); diff != "" {
+				t.Errorf("syntax tree mismatch in %q (-want +got):\n%s", tc.in, diff)
 			}
 		})
 	}
@@ -2323,16 +2391,15 @@ func TestParseArithmetic(t *testing.T) {
 	t.Parallel()
 	p := NewParser()
 
-	for i, tc := range arithmeticTests {
-		t.Run(fmt.Sprintf("%02d", i), func(t *testing.T) {
+	for _, tc := range arithmeticTests {
+		t.Run("", func(t *testing.T) {
 			got, err := p.Arithmetic(strings.NewReader(tc.in))
 			if err != nil {
 				t.Fatal(err)
 			}
-			clearPosRecurse(t, "", got)
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("syntax tree mismatch in %q\ndiff:\n%s", tc.in,
-					strings.Join(pretty.Diff(tc.want, got), "\n"))
+			recursiveSanityCheck(t, "", got)
+			if diff := cmp.Diff(tc.want, got, cmpOpt); diff != "" {
+				t.Errorf("syntax tree mismatch in %q (-want +got):\n%s", tc.in, diff)
 			}
 		})
 	}
@@ -2353,7 +2420,7 @@ func TestParseArithmeticError(t *testing.T) {
 var stopAtTests = []struct {
 	in   string
 	stop string
-	want interface{}
+	want any
 }{
 	{
 		"foo bar", "$$",
@@ -2395,10 +2462,10 @@ var stopAtTests = []struct {
 
 func TestParseStmtsStopAt(t *testing.T) {
 	t.Parallel()
-	for i, c := range stopAtTests {
+	for _, c := range stopAtTests {
 		p := NewParser(StopAt(c.stop))
 		want := fullProg(c.want)
-		t.Run(fmt.Sprintf("%02d", i), singleParse(p, c.in, want))
+		t.Run("", singleParse(p, c.in, want))
 	}
 }
 

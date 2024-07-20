@@ -20,10 +20,11 @@ func TestMain(m *testing.M) {
 
 var update = flag.Bool("u", false, "update testscript output files")
 
-func TestScripts(t *testing.T) {
+func TestScript(t *testing.T) {
 	t.Parallel()
 	testscript.Run(t, testscript.Params{
-		Dir:           filepath.Join("testdata", "scripts"),
-		UpdateScripts: *update,
+		Dir:                 filepath.Join("testdata", "script"),
+		UpdateScripts:       *update,
+		RequireExplicitExec: true,
 	})
 }

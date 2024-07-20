@@ -6,7 +6,7 @@ package syntax
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -20,8 +20,8 @@ func TestPrintCompact(t *testing.T) {
 	parserMirBSD := NewParser(KeepComments(true), Variant(LangMirBSDKorn))
 	parserBats := NewParser(KeepComments(true), Variant(LangBats))
 	printer := NewPrinter()
-	for i, c := range fileTests {
-		t.Run(fmt.Sprintf("%03d", i), func(t *testing.T) {
+	for _, c := range append(fileTests, fileTestsKeepComments...) {
+		t.Run("", func(t *testing.T) {
 			in := c.Strs[0]
 			parser := parserPosix
 			if c.Bats != nil {
@@ -79,6 +79,7 @@ var printTests = []printCase{
 	samePrint("#"),
 	samePrint("#c1\\\n#c2"),
 	samePrint("#\\\n#"),
+	{"#\\\r\n#", "#\\\n#"},
 	samePrint("{\n\t# foo \\\n}"),
 	samePrint("foo\\\\\nbar"),
 	samePrint("a=b # inline\nbar"),
@@ -90,7 +91,10 @@ var printTests = []printCase{
 	{"if a; then b\nelse c\nfi", "if a; then\n\tb\nelse\n\tc\nfi"},
 	samePrint("foo >&2 <f bar"),
 	samePrint("foo >&2 bar <f"),
-	{"foo >&2 bar <f bar2", "foo >&2 bar bar2 <f"},
+	samePrint(">&2 foo bar <f"),
+	samePrint(">&2 foo"),
+	samePrint(">&2 foo 2>&1 bar <f"),
+	{"foo >&2>/dev/null", "foo >&2 >/dev/null"},
 	{"foo <<EOF bar\nl1\nEOF", "foo bar <<EOF\nl1\nEOF"},
 	samePrint("foo <<\\\\\\\\EOF\nbar\n\\\\EOF"),
 	samePrint("foo <<\"\\EOF\"\nbar\n\\EOF"),
@@ -143,14 +147,16 @@ var printTests = []printCase{
 		"a bb\\\ncc d",
 		"a bbcc d",
 	},
-	samePrint("a \\\n\tb \\\n\tc \\\n\t;"),
-	samePrint("a=1 \\\n\tb=2 \\\n\tc=3 \\\n\t;"),
+	samePrint("a \\\n\tb \\\n\t\"c\" \\\n\t;"),
+	samePrint("a=1 \\\n\tb=2 \\\n\tc=\"3\" \\\n\t;"),
 	{
 		"a=\\\nfoo\nb=\\\n\"bar\"\nc=\\\n'baz'",
 		"a=foo\nb=\"bar\"\nc='baz'",
 	},
 
 	samePrint("if a \\\n\t; then b; fi"),
+	samePrint("a > \\\n\tfoo"),
+	samePrint("a <<< \\\n\t\"foo\""),
 	samePrint("a 'b\nb' c"),
 	samePrint("a $'b\nb' c"),
 	{
@@ -239,6 +245,7 @@ var printTests = []printCase{
 	samePrint("#before\nfoo && bar"),
 	samePrint("foo | bar # inline"),
 	samePrint("foo && bar # inline"),
+	samePrint("foo `# inline` \\\n\tbar"),
 	samePrint("for a in 1 2; do\n\n\tbar\ndone"),
 	{
 		"a \\\n\t&& b",
@@ -330,6 +337,22 @@ var printTests = []printCase{
 	samePrint("\"foo\\\n  bar\""),
 	samePrint("'foo\\\n  bar'"),
 	samePrint("v=\"\\\nfoo\""),
+	{
+		"v=foo\\\nbar",
+		"v=foobar",
+	},
+	{
+		"v='foo'\\\n'bar'",
+		"v='foo''bar'",
+	},
+	{
+		"v=\\\n\"foo\"",
+		"v=\"foo\"",
+	},
+	{
+		"v=\\\nfoo\\\n$bar",
+		"v=foo$bar",
+	},
 	samePrint("\"\\\n\\\nfoo\\\n\\\n\""),
 	samePrint("'\\\n\\\nfoo\\\n\\\n'"),
 	{
@@ -371,12 +394,21 @@ var printTests = []printCase{
 		"case $i in\n1)\n#foo \t\n;;\nesac",
 		"case $i in\n1)\n\t#foo\n\t;;\nesac",
 	},
+	{
+		"case $i in\n1)\n\t;;\n\n2)\n\t;;\nesac",
+		"case $i in\n1) ;;\n\n2) ;;\nesac",
+	},
+	{
+		"case $i\nin\n1)\n\t;;\nesac",
+		"case $i in\n1) ;;\nesac",
+	},
 	samePrint("case $i in\n1)\n\ta\n\t#b\n\t;;\nesac"),
 	samePrint("case $i in\n1) foo() { bar; } ;;\nesac"),
 	samePrint("case $i in\n1) ;; #foo\nesac"),
 	samePrint("case $i in\n#foo\nesac"),
 	samePrint("case $i in\n#before\n1) ;;\nesac"),
 	samePrint("case $i in\n#bef\n1) ;; #inl\nesac"),
+	samePrint("case $i in\n#before1\n'1') ;;\n#before2\n'2') ;;\nesac"),
 	samePrint("case $i in\n1) ;; #inl1\n2) ;; #inl2\nesac"),
 	samePrint("case $i in\n#bef\n1) #inl\n\tfoo\n\t;;\nesac"),
 	samePrint("case $i in\n1) #inl\n\t;;\nesac"),
@@ -534,6 +566,34 @@ var printTests = []printCase{
 		"foo() # inline\n{\n\tbar\n}",
 		"foo() { # inline\n\tbar\n}",
 	},
+	{
+		"foo() #before\n(\n\tbar #inline\n)",
+		"foo() ( #before\n\tbar #inline\n)",
+	},
+	{
+		"foo() (#before\n\tbar #inline\n)",
+		"foo() ( #before\n\tbar #inline\n)",
+	},
+	{
+		"foo()\n#before-1\n(#before-2\n\tbar #inline\n)",
+		"foo() ( #before-1\n\t#before-2\n\tbar #inline\n)",
+	},
+	{
+		"(#before\n\tbar #inline\n)",
+		"( #before\n\tbar #inline\n)",
+	},
+	{
+		"(\n#before\n\tbar #inline\n)",
+		"(\n\t#before\n\tbar #inline\n)",
+	},
+	{
+		"foo=$(#before\n\tbar #inline\n)",
+		"foo=$( #before\n\tbar #inline\n)",
+	},
+	{
+		"foo=`#before\nbar`",
+		"foo=$( #before\n\tbar\n)",
+	},
 	samePrint("if foo; then\n\tbar\n\t# comment\nfi"),
 	samePrint("if foo; then\n\tbar\n# else commented out\nfi"),
 	samePrint("if foo; then\n\tx\nelse\n\tbar\n\t# comment\nfi"),
@@ -563,13 +623,42 @@ var printTests = []printCase{
 	samePrint("#comment\n>redir"),
 	{
 		">redir \\\n\tfoo",
-		"foo >redir",
+		">redir foo",
 	},
 	samePrint("$(declare)"),
 	{
 		"`declare`",
 		"$(declare)",
 	},
+	{
+		"(\n(foo >redir))",
+		"(\n\t(foo >redir)\n)",
+	},
+	{
+		"( (foo) )",
+		"( (foo))",
+	},
+	{
+		"( (foo); bar )",
+		"(\n\t(foo)\n\tbar\n)",
+	},
+	{
+		"( ((foo++)) )",
+		"( ((foo++)))",
+	},
+	{
+		"( ((foo++)); bar )",
+		"(\n\t((foo++))\n\tbar\n)",
+	},
+	samePrint("(\n\t((foo++))\n)"),
+	samePrint("(foo && bar)"),
+	samePrint(`$foo#bar ${foo}#bar 'foo'#bar "foo"#bar`),
+	// TODO: support cases with command substitutions as well
+	// {
+	// 	"`foo`#bar",
+	// 	"$(foo)#bar",
+	// },
+	// samePrint(`$("foo"#bar)#bar`),
 }
 
 func TestPrintWeirdFormat(t *testing.T) {
@@ -577,13 +666,13 @@ func TestPrintWeirdFormat(t *testing.T) {
 	parser := NewParser(KeepComments(true))
 	printer := NewPrinter()
 	for i, tc := range printTests {
-		t.Run(fmt.Sprintf("%03d", i), func(t *testing.T) {
+		t.Run(fmt.Sprintf("#%03d", i), func(t *testing.T) {
 			printTest(t, parser, printer, tc.in, tc.want)
 		})
-		t.Run(fmt.Sprintf("%03d-nl", i), func(t *testing.T) {
+		t.Run(fmt.Sprintf("#%03d-nl", i), func(t *testing.T) {
 			printTest(t, parser, printer, "\n"+tc.in+"\n", tc.want)
 		})
-		t.Run(fmt.Sprintf("%03d-redo", i), func(t *testing.T) {
+		t.Run(fmt.Sprintf("#%03d-redo", i), func(t *testing.T) {
 			printTest(t, parser, printer, tc.want, tc.want)
 		})
 	}
@@ -612,7 +701,7 @@ func TestPrintMultiline(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	wantBs, err := ioutil.ReadFile(canonicalPath)
+	wantBs, err := os.ReadFile(canonicalPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -631,7 +720,7 @@ func BenchmarkPrint(b *testing.B) {
 	prog := parsePath(b, canonicalPath)
 	printer := NewPrinter()
 	for i := 0; i < b.N; i++ {
-		if err := printer.Print(ioutil.Discard, prog); err != nil {
+		if err := printer.Print(io.Discard, prog); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -671,8 +760,8 @@ func TestPrintSpaces(t *testing.T) {
 	}
 
 	parser := NewParser(KeepComments(true))
-	for i, tc := range spaceFormats {
-		t.Run(fmt.Sprintf("%03d", i), func(t *testing.T) {
+	for _, tc := range spaceFormats {
+		t.Run("", func(t *testing.T) {
 			printer := NewPrinter(Indent(tc.spaces))
 			printTest(t, parser, printer, tc.in, tc.want)
 		})
@@ -769,8 +858,8 @@ func TestPrintBinaryNextLine(t *testing.T) {
 	}
 	parser := NewParser(KeepComments(true))
 	printer := NewPrinter(BinaryNextLine(true))
-	for i, tc := range tests {
-		t.Run(fmt.Sprintf("%03d", i), func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run("", func(t *testing.T) {
 			printTest(t, parser, printer, tc.in, tc.want)
 		})
 	}
@@ -791,8 +880,8 @@ func TestPrintSwitchCaseIndent(t *testing.T) {
 	}
 	parser := NewParser(KeepComments(true))
 	printer := NewPrinter(SwitchCaseIndent(true))
-	for i, tc := range tests {
-		t.Run(fmt.Sprintf("%03d", i), func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run("", func(t *testing.T) {
 			printTest(t, parser, printer, tc.in, tc.want)
 		})
 	}
@@ -828,8 +917,8 @@ func TestPrintFunctionNextLine(t *testing.T) {
 	}
 	parser := NewParser(KeepComments(true))
 	printer := NewPrinter(FunctionNextLine(true))
-	for i, tc := range tests {
-		t.Run(fmt.Sprintf("%03d", i), func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run("", func(t *testing.T) {
 			printTest(t, parser, printer, tc.in, tc.want)
 		})
 	}
@@ -850,8 +939,8 @@ func TestPrintSpaceRedirects(t *testing.T) {
 	}
 	parser := NewParser(KeepComments(true))
 	printer := NewPrinter(SpaceRedirects(true))
-	for i, tc := range tests {
-		t.Run(fmt.Sprintf("%03d", i), func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run("", func(t *testing.T) {
 			printTest(t, parser, printer, tc.in, tc.want)
 		})
 	}
@@ -890,8 +979,8 @@ func TestPrintKeepPadding(t *testing.T) {
 	}
 	parser := NewParser(KeepComments(true))
 	printer := NewPrinter(KeepPadding(true))
-	for i, tc := range tests {
-		t.Run(fmt.Sprintf("%03d", i), func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run("", func(t *testing.T) {
 			// ensure that Reset does properly reset colCounter
 			printer.WriteByte('x')
 			printer.Reset(nil)
@@ -911,8 +1000,8 @@ func TestPrintKeepPaddingSpaces(t *testing.T) {
 	}
 	parser := NewParser(KeepComments(true))
 	printer := NewPrinter(KeepPadding(true), Indent(2))
-	for i, tc := range tests {
-		t.Run(fmt.Sprintf("%03d", i), func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run("", func(t *testing.T) {
 			printTest(t, parser, printer, tc.in, tc.want)
 		})
 	}
@@ -983,13 +1072,26 @@ func TestPrintMinify(t *testing.T) {
 			"${0/${a}\\\n}",
 			"${0/$a/}",
 		},
+		{
+			"#!/bin/sh\necho 1\n#!/bin/sh\necho 2",
+			"#!/bin/sh\necho 1\necho 2",
+		},
 		samePrint("foo >bar 2>baz <etc"),
 		samePrint("<<-EOF\n$(a|b)\nEOF"),
+		{
+			"a=$(\n\tcat <<'EOF'\n  hello\nEOF\n)",
+			"a=$(cat <<'EOF'\n  hello\nEOF\n)",
+		},
+		{
+			"(\n\tcat <<EOF\n hello\nEOF\n)",
+			"(cat <<EOF\n hello\nEOF\n)",
+		},
+		samePrint("diff -y <(cat <<EOF\n1\n2\n3\nEOF\n) <(cat <<EOF\n1\n4\n3\nEOF\n)"),
 	}
 	parser := NewParser(KeepComments(true))
 	printer := NewPrinter(Minify(true))
-	for i, tc := range tests {
-		t.Run(fmt.Sprintf("%03d", i), func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run("", func(t *testing.T) {
 			printTest(t, parser, printer, tc.in, tc.want)
 		})
 	}
@@ -1044,8 +1146,8 @@ func TestPrintSingleLine(t *testing.T) {
 	}
 	parser := NewParser(KeepComments(true))
 	printer := NewPrinter(SingleLine(true))
-	for i, tc := range tests {
-		t.Run(fmt.Sprintf("%03d", i), func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run("", func(t *testing.T) {
 			printTest(t, parser, printer, tc.in, tc.want)
 		})
 	}
@@ -1078,8 +1180,8 @@ func TestPrintOptionsNotBroken(t *testing.T) {
 		{"SingleLine", []PrinterOption{SingleLine(true)}},
 	} {
 		printer := NewPrinter(opts.list...)
-		for i, tc := range fileTests {
-			t.Run(fmt.Sprintf("File%s%03d", opts.name, i), func(t *testing.T) {
+		for _, tc := range append(fileTests, fileTestsNoPrint...) {
+			t.Run("File"+opts.name, func(t *testing.T) {
 				parser := parserPosix
 				if tc.Bats != nil {
 					parser = parserBats
@@ -1106,8 +1208,8 @@ func TestPrintOptionsNotBroken(t *testing.T) {
 				}
 			})
 		}
-		for i, tc := range printTests {
-			t.Run(fmt.Sprintf("Print%s%03d", opts.name, i), func(t *testing.T) {
+		for _, tc := range printTests {
+			t.Run("Print"+opts.name, func(t *testing.T) {
 				prog, err := parserBash.Parse(strings.NewReader(tc.in), "")
 				if err != nil {
 					t.Fatal(err)
@@ -1226,8 +1328,8 @@ func TestPrintNodeTypes(t *testing.T) {
 		},
 	}
 	printer := NewPrinter()
-	for i, tc := range tests {
-		t.Run(fmt.Sprintf("%03d", i), func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run("", func(t *testing.T) {
 			got, err := strPrint(printer, tc.in)
 			if err == nil && tc.wantErr {
 				t.Fatalf("wanted an error but found none")
@@ -1256,8 +1358,8 @@ func TestPrintManyStmts(t *testing.T) {
 	}
 	parser := NewParser(KeepComments(true))
 	printer := NewPrinter()
-	for i, tc := range tests {
-		t.Run(fmt.Sprintf("%03d", i), func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run("", func(t *testing.T) {
 			f, err := parser.Parse(strings.NewReader(tc.in), "")
 			if err != nil {
 				t.Fatal(err)

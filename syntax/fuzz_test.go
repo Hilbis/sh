@@ -2,122 +2,178 @@
 // See LICENSE for licensing information
 
 //go:build go1.18
-// +build go1.18
 
-package syntax_test
+package syntax
 
 import (
-	"io/ioutil"
+	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"testing"
 
-	"mvdan.cc/sh/v3/syntax"
+	qt "github.com/frankban/quicktest"
 )
 
 func FuzzQuote(f *testing.F) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		f.Skipf("requires bash to verify quoted strings")
+	}
+
 	// Keep in sync with ExampleQuote.
-	f.Add("foo")
-	f.Add("bar $baz")
-	f.Add(`"won't"`)
-	f.Add(`~/home`)
-	f.Add("#1304")
-	f.Add("name=value")
-	f.Add(`glob-*`)
-	f.Add("invalid-\xe2'")
-	f.Add("nonprint-\x0b\x1b")
-	f.Fuzz(func(t *testing.T, s string) {
-		quoted, ok := syntax.Quote(s)
-		if !ok {
-			// Contains a null byte; not interesting.
+	f.Add("foo", uint8(LangBash))
+	f.Add("bar $baz", uint8(LangBash))
+	f.Add(`"won't"`, uint8(LangBash))
+	f.Add(`~/home`, uint8(LangBash))
+	f.Add("#1304", uint8(LangBash))
+	f.Add("name=value", uint8(LangBash))
+	f.Add(`glob-*`, uint8(LangBash))
+	f.Add("invalid-\xe2'", uint8(LangBash))
+	f.Add("nonprint-\x0b\x1b", uint8(LangBash))
+	f.Fuzz(func(t *testing.T, s string, langVariant uint8) {
+		if langVariant > 3 {
+			t.Skip() // lang variants are 0-3
+		}
+		lang := LangVariant(langVariant)
+		quoted, err := Quote(s, lang)
+		if err != nil {
+			// Cannot be quoted; not interesting.
 			t.Skip()
 		}
-		// Beware that this might run arbitrary code
-		// if Quote is too naive and allows ';' or '$'.
-		//
-		// Also note that this fuzzing would not catch '=',
-		// as we don't use the quoted string as a first argument
-		// to avoid running random commands.
-		//
-		// We could consider ways to fully sandbox the bash process,
-		// but for now that feels overkill.
-		out, err := exec.Command("bash", "-c", "printf %s "+quoted).CombinedOutput()
+
+		var shellProgram string
+		switch lang {
+		case LangBash:
+			hasBash51(t)
+			shellProgram = "bash"
+		case LangPOSIX:
+			hasDash059(t)
+			shellProgram = "dash"
+		case LangMirBSDKorn:
+			hasMksh59(t)
+			shellProgram = "mksh"
+		case LangBats:
+			t.Skip() // bats has no shell and its syntax is just bash
+		default:
+			panic(fmt.Sprintf("unknown lang variant: %d", lang))
+		}
+
+		// Verify that our parser ends up with a simple command with one word.
+		f, err := NewParser(Variant(lang)).Parse(strings.NewReader(quoted), "")
 		if err != nil {
-			t.Fatalf("bash error on %q quoted as %s: %v: %s", s, quoted, err, out)
+			t.Fatalf("parse error on %q quoted as %s: %v", s, quoted, err)
+		}
+		qt.Assert(t, len(f.Stmts), qt.Equals, 1, qt.Commentf("in: %q, quoted: %s", s, quoted))
+		call, ok := f.Stmts[0].Cmd.(*CallExpr)
+		qt.Assert(t, ok, qt.IsTrue, qt.Commentf("in: %q, quoted: %s", s, quoted))
+		qt.Assert(t, len(call.Args), qt.Equals, 1, qt.Commentf("in: %q, quoted: %s", s, quoted))
+
+		// Also check that the single word only uses literals or quoted strings.
+		Walk(call.Args[0], func(node Node) bool {
+			switch node.(type) {
+			case nil, *Word, *Lit, *SglQuoted, *DblQuoted:
+			default:
+				t.Fatalf("unexpected node type: %T", node)
+			}
+			return true
+		})
+
+		// The process below shouldn't run arbitrary code,
+		// since our parser checks above should catch the use of ';' or '$',
+		// in the case that Quote were too naive to quote them.
+		out, err := exec.Command(shellProgram, "-c", "printf %s "+quoted).CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s error on %q quoted as %s: %v: %s", shellProgram, s, quoted, err, out)
 		}
 		want, got := s, string(out)
 		if want != got {
-			t.Fatalf("output mismatch on %q quoted as %s: got %q (len=%d)", want, quoted, got, len(got))
+			t.Fatalf("%s output mismatch on %q quoted as %s: got %q (len=%d)",
+				shellProgram, want, quoted, got, len(got))
 		}
 	})
 }
 
 func FuzzParsePrint(f *testing.F) {
-	// TODO: turn these into separate option parameters
-	var zeroParserOpts uint8
-	var zeroPrinterOpts uint16
+	add := func(src string, variant LangVariant) {
+		// For now, default to just KeepComments.
+		f.Add(src, uint8(variant), true, false,
+			uint8(0), false, false, false, false, false, false, false)
+	}
 
-	// TODO: probably use f.Add on table-driven test cases too?
-	// In the past, any crashers found by go-fuzz got put there.
+	for _, test := range shellTests {
+		add(test.in, LangBash)
+	}
+	for _, test := range printTests {
+		add(test.in, LangBash)
+	}
+	for _, test := range fileTests {
+		for _, in := range test.Strs {
+			if test.Bash != nil {
+				add(in, LangBash)
+			}
+			if test.Posix != nil {
+				add(in, LangPOSIX)
+			}
+			if test.MirBSDKorn != nil {
+				add(in, LangMirBSDKorn)
+			}
+			if test.Bats != nil {
+				add(in, LangBats)
+			}
+		}
+	}
 
-	f.Add("echo foo", zeroParserOpts, zeroPrinterOpts)
-	f.Add("'foo' \"bar\" $'baz'", zeroParserOpts, zeroPrinterOpts)
-	f.Add("if foo; then bar; baz; fi", zeroParserOpts, zeroPrinterOpts)
-	f.Add("{ (foo; bar); baz; }", zeroParserOpts, zeroPrinterOpts)
-	f.Add("$foo ${bar} ${baz[@]} $", zeroParserOpts, zeroPrinterOpts)
-	f.Add("foo >bar <<EOF\nbaz\nEOF", zeroParserOpts, zeroPrinterOpts)
-	f.Add("foo=bar baz=(x y z)", zeroParserOpts, zeroPrinterOpts)
-	f.Add("foo && bar || baz", zeroParserOpts, zeroPrinterOpts)
-	f.Add("foo | bar # baz", zeroParserOpts, zeroPrinterOpts)
-	f.Add("foo \\\n bar \\\\ba\\z", zeroParserOpts, zeroPrinterOpts)
+	f.Fuzz(func(t *testing.T,
+		src string,
 
-	f.Fuzz(func(t *testing.T, src string, parserOpts uint8, printerOpts uint16) {
-		// Below are the bit masks for parserOpts and printerOpts.
-		// Most masks are a single bit, for boolean options.
-		const (
-			// parser
-			// TODO: also fuzz StopAt
-			maskLangVariant  = 0b0000_0011 // two bits; 0-3 matching the iota
-			maskKeepComments = 0b0000_0100
-			maskSimplify     = 0b0000_1000 // pretend it's a parser option
+		// parser options
+		// TODO: also fuzz StopAt
+		langVariant uint8, // 0-3
+		keepComments bool,
 
-			// printer
-			maskIndent           = 0b0000_0000_0000_1111 // three bits; 0-15
-			maskBinaryNextLine   = 0b0000_0000_0001_0000
-			maskSwitchCaseIndent = 0b0000_0000_0010_0000
-			maskSpaceRedirects   = 0b0000_0000_0100_0000
-			maskKeepPadding      = 0b0000_0000_1000_0000
-			maskMinify           = 0b0000_0001_0000_0000
-			maskSingleLine       = 0b0000_0010_0000_0000
-			maskFunctionNextLine = 0b0000_0100_0000_0000
-		)
+		simplify bool,
 
-		parser := syntax.NewParser()
-		lang := syntax.LangVariant(parserOpts & maskLangVariant) // range 0-3
-		syntax.Variant(lang)(parser)
-		syntax.KeepComments(parserOpts&maskKeepComments != 0)(parser)
+		// printer options
+		indent uint8, // 0-255
+		binaryNextLine bool,
+		switchCaseIndent bool,
+		spaceRedirects bool,
+		keepPadding bool,
+		minify bool,
+		singleLine bool,
+		functionNextLine bool,
+	) {
+		if langVariant > 3 {
+			t.Skip() // lang variants are 0-3
+		}
+		if indent > 16 {
+			t.Skip() // more indentation won't really be interesting
+		}
+
+		parser := NewParser()
+		Variant(LangVariant(langVariant))(parser)
+		KeepComments(keepComments)(parser)
 
 		prog, err := parser.Parse(strings.NewReader(src), "")
 		if err != nil {
 			t.Skip() // not valid shell syntax
 		}
 
-		if parserOpts&maskSimplify != 0 {
-			syntax.Simplify(prog)
+		if simplify {
+			Simplify(prog)
 		}
 
-		printer := syntax.NewPrinter()
-		indent := uint(printerOpts & maskIndent) // range 0-15
-		syntax.Indent(indent)(printer)
-		syntax.BinaryNextLine(printerOpts&maskBinaryNextLine != 0)(printer)
-		syntax.SwitchCaseIndent(printerOpts&maskSwitchCaseIndent != 0)(printer)
-		syntax.SpaceRedirects(printerOpts&maskSpaceRedirects != 0)(printer)
-		syntax.KeepPadding(printerOpts&maskKeepPadding != 0)(printer)
-		syntax.Minify(printerOpts&maskMinify != 0)(printer)
-		syntax.SingleLine(printerOpts&maskSingleLine != 0)(printer)
-		syntax.FunctionNextLine(printerOpts&maskFunctionNextLine != 0)(printer)
+		printer := NewPrinter()
+		Indent(uint(indent))(printer)
+		BinaryNextLine(binaryNextLine)(printer)
+		SwitchCaseIndent(switchCaseIndent)(printer)
+		SpaceRedirects(spaceRedirects)(printer)
+		KeepPadding(keepPadding)(printer)
+		Minify(minify)(printer)
+		SingleLine(singleLine)(printer)
+		FunctionNextLine(functionNextLine)(printer)
 
-		if err := printer.Print(ioutil.Discard, prog); err != nil {
+		if err := printer.Print(io.Discard, prog); err != nil {
 			t.Skip() // e.g. invalid option
 		}
 	})

@@ -28,31 +28,39 @@ predictable. Some aspects of the format can be configured via printer flags.
 *-version*
 	Show version and exit.
 
-*-l*
+*-l*, *--list*
 	List files whose formatting differs from shfmt's.
 
-*-w*
+*-w*, *--write*
 	Write result to file instead of stdout.
 
-*-d*
+*-d*, *--diff*
 	Error with a diff when the formatting differs.
 
 	The diff uses color when the output is a terminal.
 	To never use color, set a non-empty *NO_COLOR* or *TERM=dumb*.
 	To always use color, set a non-empty *FORCE_COLOR*.
 
-*-s*
+*-s*, *--simplify*
 	Simplify the code.
 
-*-mn*
+*-mn*, *--minify*
 	Minify the code to reduce its size (implies *-s*).
 
 ## Parser flags
 
-*-ln* <str>
-	Language variant to parse (*bash*/*posix*/*mksh*/*bats*, default *bash*).
+*-ln*, *--language-dialect* <str>
+	Language dialect (*bash*/*posix*/*mksh*/*bats*, default *auto*).
 
-*-p*
+	When set to *auto*, the language is detected from the input filename,
+	as long as it has a shell extension like *foo.mksh*. Otherwise, if the input
+	begins with a shell shebang like *#!/bin/sh*, that's used instead.
+	If neither come up with a result, *bash* is used as a fallback.
+
+	The filename extension *.sh* is a special case: it implies *posix*,
+	but may be overriden by a valid shell shebang.
+
+*-p*, *--posix*
 	Shorthand for *-ln=posix*.
 
 *-filename* str
@@ -60,31 +68,34 @@ predictable. Some aspects of the format can be configured via printer flags.
 
 ## Printer flags
 
-*-i* <uint>
+*-i*, *--indent* <uint>
 	Indent: *0* for tabs (default), *>0* for number of spaces.
 
-*-bn*
+*-bn*, *--binary-next-line*
 	Binary ops like *&&* and *|* may start a line.
 
-*-ci*
+*-ci*, *--case-indent*
 	Switch cases will be indented.
 
-*-sr*
+*-sr*, *--space-redirects*
 	Redirect operators will be followed by a space.
 
-*-kp*
+*-kp*, *--keep-padding*
 	Keep column alignment paddings.
 
-*-fn*
+*-fn*, *--func-next-line*
 	Function opening braces are placed on a separate line.
 
 ## Utility flags
 
-*-f*
+*-f*, *--find*
 	Recursively find all shell files and print the paths.
 
-*-tojson*
+*--to-json*
 	Print syntax tree to stdout as a typed JSON.
+
+*--from-json*
+	Read syntax tree from stdin as a typed JSON.
 
 # EXAMPLES
 
@@ -97,7 +108,7 @@ For CI, one can use a variant where formatting changes are just shown as diffs:
 	shfmt -d .
 
 The following formatting flags closely resemble Google's shell style defined in
-<https://google.github.io/styleguide/shell.xml>:
+<https://google.github.io/styleguide/shellguide.html>:
 
 	shfmt -i 2 -ci -bn
 
@@ -110,12 +121,15 @@ showing how to set any option:
 indent_style = space
 indent_size = 4
 
-shell_variant      = posix # like -ln=posix
-binary_next_line   = true  # like -bn
-switch_case_indent = true  # like -ci
-space_redirects    = true  # like -sr
-keep_padding       = true  # like -kp
-function_next_line = true  # like -fn
+# --language-variant
+shell_variant      = posix
+binary_next_line   = true
+# --case-indent
+switch_case_indent = true
+space_redirects    = true
+keep_padding       = true
+# --func-next-line
+function_next_line = true
 
 # Ignore the entire "third_party" directory.
 [third_party/**]

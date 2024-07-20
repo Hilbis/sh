@@ -5,11 +5,7 @@ package syntax
 
 import (
 	"bytes"
-	"fmt"
 	"io"
-	"strconv"
-	"strings"
-	"unicode"
 	"unicode/utf8"
 )
 
@@ -84,9 +80,14 @@ retry:
 				goto retry
 			}
 			if b == '\\' {
-				if p.r != '\\' && p.peekByte('\n') {
+				if p.r == '\\' {
+				} else if p.peekByte('\n') {
 					p.bsp++
 					p.w, p.r = 1, escNewl
+					return escNewl
+				} else if p.peekBytes("\r\n") {
+					p.bsp += 2
+					p.w, p.r = 2, escNewl
 					return escNewl
 				}
 				if p.openBquotes > 0 && bquotes < p.openBquotes &&
@@ -269,12 +270,32 @@ skipSpace:
 		case ';', '"', '\'', '(', ')', '$', '|', '&', '>', '<', '`':
 			p.tok = p.regToken(r)
 		case '#':
+			// If we're parsing $foo#bar, ${foo}#bar, 'foo'#bar, or "foo"#bar,
+			// #bar is a continuation of the same word, not a comment.
+			// TODO: support $(foo)#bar and `foo`#bar as well, which is slightly tricky,
+			// as we can't easily tell them apart from (foo)#bar and `#bar`,
+			// where #bar should remain a comment.
+			if !p.spaced {
+				switch p.tok {
+				case _LitWord, rightBrace, sglQuote, dblQuote:
+					p.advanceLitNone(r)
+					return
+				}
+			}
 			r = p.rune()
 			p.newLit(r)
-			for r != '\n' && r != utf8.RuneSelf {
-				if r == escNewl {
+		runeLoop:
+			for {
+				switch r {
+				case '\n', utf8.RuneSelf:
+					break runeLoop
+				case escNewl:
 					p.litBs = append(p.litBs, '\\', '\n')
-					break
+					break runeLoop
+				case '`':
+					if p.backquoteEnd() {
+						break runeLoop
+					}
 				}
 				r = p.rune()
 			}
@@ -294,7 +315,7 @@ skipSpace:
 				p.advanceLitNone(r)
 			}
 		case '?', '*', '+', '@', '!':
-			if p.peekByte('(') {
+			if p.extendedGlob() {
 				switch r {
 				case '?':
 					p.tok = globQuest
@@ -350,6 +371,34 @@ skipSpace:
 	}
 }
 
+// extendedGlob determines whether we're parsing a Bash extended globbing expression.
+// For example, whether `*` or `@` are followed by `(` to form `@(foo)`.
+func (p *Parser) extendedGlob() bool {
+	if p.val == "function" {
+		return false
+	}
+	if p.peekByte('(') {
+		// NOTE: empty pattern list is a valid globbing syntax like `@()`,
+		// but we'll operate on the "likelihood" that it is a function;
+		// only tokenize if its a non-empty pattern list.
+		// We do this after peeking for just one byte, so that the input `echo *`
+		// followed by a newline does not hang an interactive shell parser until
+		// another byte is input.
+		return !p.peekBytes("()")
+	}
+	return false
+}
+
+func (p *Parser) peekBytes(s string) bool {
+	peekEnd := p.bsp + len(s)
+	// TODO: This should loop for slow readers, e.g. those providing one byte at
+	// a time. Use a loop and test it with testing/iotest.OneByteReader.
+	if peekEnd > len(p.bs) {
+		p.fill()
+	}
+	return peekEnd <= len(p.bs) && bytes.HasPrefix(p.bs[p.bsp:peekEnd], []byte(s))
+}
+
 func (p *Parser) peekByte(b byte) bool {
 	if p.bsp == len(p.bs) {
 		p.fill()
@@ -380,9 +429,6 @@ func (p *Parser) regToken(r rune) token {
 			p.rune()
 			return andAnd
 		case '>':
-			if p.lang == LangPOSIX {
-				break
-			}
 			if p.rune() == '>' {
 				p.rune()
 				return appAll
@@ -472,7 +518,7 @@ func (p *Parser) regToken(r rune) token {
 			if r = p.rune(); r == '-' {
 				p.rune()
 				return dashHdoc
-			} else if r == '<' && p.lang != LangPOSIX {
+			} else if r == '<' {
 				p.rune()
 				return wordHdoc
 			}
@@ -782,7 +828,7 @@ func (p *Parser) endLit() (s string) {
 	if p.r == utf8.RuneSelf || p.r == escNewl {
 		s = string(p.litBs)
 	} else {
-		s = string(p.litBs[:len(p.litBs)-int(p.w)])
+		s = string(p.litBs[:len(p.litBs)-p.w])
 	}
 	p.litBs = nil
 	return
@@ -886,7 +932,7 @@ loop:
 			tok = _Lit
 			break loop
 		case '?', '*', '+', '@', '!':
-			if p.peekByte('(') {
+			if p.extendedGlob() {
 				tok = _Lit
 				break loop
 			}
@@ -943,11 +989,17 @@ func (p *Parser) advanceLitHdoc(r rune) {
 	stop := p.hdocStops[len(p.hdocStops)-1]
 	for ; ; r = p.rune() {
 		switch r {
-		case escNewl, '`', '$':
+		case escNewl, '$':
 			p.val = p.endLit()
 			return
 		case '\\': // escaped byte follows
 			p.rune()
+		case '`':
+			if !p.backquoteEnd() {
+				p.val = p.endLit()
+				return
+			}
+			fallthrough
 		case '\n', utf8.RuneSelf:
 			if p.parsingDoc {
 				if r == utf8.RuneSelf {
@@ -961,8 +1013,8 @@ func (p *Parser) advanceLitHdoc(r rune) {
 			} else if lStart >= 0 {
 				// Compare the current line with the stop word.
 				line := p.litBs[lStart:]
-				if r == '\n' && len(line) > 0 {
-					line = line[:len(line)-1] // minus \n
+				if r != utf8.RuneSelf && len(line) > 0 {
+					line = line[:len(line)-1] // minus trailing character
 				}
 				if bytes.Equal(line, stop) {
 					p.tok = _LitWord
@@ -974,8 +1026,8 @@ func (p *Parser) advanceLitHdoc(r rune) {
 					return
 				}
 			}
-			if r == utf8.RuneSelf {
-				return
+			if r != '\n' {
+				return // hit an unexpected EOF or closing backquote
 			}
 			if p.quote == hdocBodyTabs {
 				for p.peekByte('\t') {
@@ -1002,10 +1054,18 @@ func (p *Parser) quotedHdocWord() *Word {
 			}
 		}
 		lStart := len(p.litBs) - 1
-		for r != utf8.RuneSelf && r != '\n' {
-			if r == escNewl {
+	runeLoop:
+		for {
+			switch r {
+			case utf8.RuneSelf, '\n':
+				break runeLoop
+			case '`':
+				if p.backquoteEnd() {
+					break runeLoop
+				}
+			case escNewl:
 				p.litBs = append(p.litBs, '\\', '\n')
-				break
+				break runeLoop
 			}
 			r = p.rune()
 		}
@@ -1014,7 +1074,7 @@ func (p *Parser) quotedHdocWord() *Word {
 		}
 		// Compare the current line with the stop word.
 		line := p.litBs[lStart:]
-		if r == '\n' && len(line) > 0 {
+		if r != utf8.RuneSelf && len(line) > 0 {
 			line = line[:len(line)-1] // minus \n
 		}
 		if bytes.Equal(line, stop) {
@@ -1023,7 +1083,7 @@ func (p *Parser) quotedHdocWord() *Word {
 			if val == "" {
 				return nil
 			}
-			return p.word(p.wps(p.lit(pos, val)))
+			return p.wordOne(p.lit(pos, val))
 		}
 	}
 }
@@ -1146,107 +1206,4 @@ func testBinaryOp(val string) BinTestOperator {
 	default:
 		return 0
 	}
-}
-
-// Quote returns a quoted version of the input string,
-// so that the quoted version is always expanded or interpreted
-// as the original string.
-//
-// When the boolean result is false,
-// the input string cannot be quoted to satisfy the rule above.
-// For example, an expanded shell string can't contain a null byte.
-//
-// Quoting is necessary when using arbitrary literal strings
-// as words in a shell script or command.
-// Without quoting, one could run into syntax errors,
-// as well as the possibility of running unintended code.
-//
-// The quoting strategy is chosen on a best-effort basis,
-// to minimize the amount of extra bytes necessary.
-//
-// Some strings do not require any quoting and are returned unchanged.
-// Those strings can be directly surrounded in single quotes.
-func Quote(s string) (_ string, ok bool) {
-	shellChars := false
-	nonPrintable := false
-	for _, r := range s {
-		switch r {
-		// Like regOps; token characters.
-		case ';', '"', '\'', '(', ')', '$', '|', '&', '>', '<', '`',
-			// Whitespace; might result in multiple fields.
-			' ', '\t', '\r', '\n',
-			// Escape sequences would be expanded.
-			'\\',
-			// Would start a comment unless quoted.
-			'#',
-			// Might result in brace expansion.
-			'{',
-			// Might result in tilde expansion.
-			'~',
-			// Might result in globbing.
-			'*', '?', '[',
-			// Might result in an assignment.
-			'=':
-			shellChars = true
-		case '\x00':
-			// We can't quote null bytes.
-			return "", false
-		}
-		if r == utf8.RuneError || !unicode.IsPrint(r) {
-			nonPrintable = true
-		}
-	}
-	if !shellChars && !nonPrintable && !IsKeyword(s) {
-		// Nothing to quote; avoid allocating.
-		return s, true
-	}
-
-	// Single quotes are usually best,
-	// as they don't require any escaping of characters.
-	// If we have any invalid utf8 or non-printable runes,
-	// use $'' so that we can escape them.
-	// Note that we can't use double quotes for those.
-	var b strings.Builder
-	if nonPrintable {
-		b.WriteString("$'")
-		quoteBuf := make([]byte, 0, 16)
-		for rem := s; len(rem) > 0; {
-			r, size := utf8.DecodeRuneInString(rem)
-			switch {
-			case r == utf8.RuneError && size == 1:
-				fmt.Fprintf(&b, "\\x%x", rem[0])
-			case !unicode.IsPrint(r):
-				quoteBuf = quoteBuf[:0]
-				quoteBuf = strconv.AppendQuoteRuneToASCII(quoteBuf, r)
-				// We don't want the single quotes from strconv.
-				b.Write(quoteBuf[1 : len(quoteBuf)-1])
-			case r == '\'', r == '\\':
-				b.WriteByte('\\')
-				b.WriteRune(r)
-			default:
-				b.WriteRune(r)
-			}
-			rem = rem[size:]
-		}
-		b.WriteString("'")
-		return b.String(), true
-	}
-
-	// Single quotes without any need for escaping.
-	if !strings.Contains(s, "'") {
-		return "'" + s + "'", true
-	}
-
-	// The string contains single quotes,
-	// so fall back to double quotes.
-	b.WriteByte('"')
-	for _, r := range s {
-		switch r {
-		case '"', '\\', '`', '$':
-			b.WriteByte('\\')
-		}
-		b.WriteRune(r)
-	}
-	b.WriteByte('"')
-	return b.String(), true
 }
