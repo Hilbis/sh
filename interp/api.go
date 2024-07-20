@@ -258,7 +258,7 @@ func Dir(path string) RunnerOption {
 		if !info.IsDir() {
 			return fmt.Errorf("%s is not a directory", path)
 		}
-		r.Dir = path
+		r.changeDir(r.ectx, path)
 		return nil
 	}
 }
