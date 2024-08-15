@@ -26,7 +26,7 @@ func isBuiltin(name string) bool {
 		"echo", "printf", "break", "continue", "pwd",
 		"wait", "builtin", "trap", "type", "source", ".", "command",
 		"dirs", "pushd", "popd", "umask", "alias", "unalias",
-		"getopts", "eval", "test", "[", "exec",
+		"getopts", "eval", "test", "[",
 		"return", "read", "mapfile", "readarray", "shopt":
 		return true
 	}
